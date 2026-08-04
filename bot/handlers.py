@@ -51,6 +51,14 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
                     )
                 ]
             )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data=f"cancel:{key}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -244,3 +252,14 @@ async def rechoose(callback: types.CallbackQuery):
         await _download_and_send(msg, key, 0)
         return
     await msg.edit_text(f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("cancel:"))
+async def cancel(callback: types.CallbackQuery):
+    await callback.answer()
+    key = callback.data.split(":", 1)[1]
+    URLS.pop(key, None)
+    try:
+        await callback.message.delete()
+    except Exception:
+        await callback.message.edit_text("❌ Отменено")
