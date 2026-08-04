@@ -31,6 +31,10 @@ class DownloadTimeoutError(Exception):
     pass
 
 
+class FileTooBigError(Exception):
+    pass
+
+
 class ExtractRetryError(Exception):
     pass
 
@@ -44,7 +48,7 @@ def _extract_info_with_retry(ydl, url: str, download: bool) -> dict:
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             return ydl.extract_info(url, download=download)
-        except DownloadTimeoutError:
+        except (DownloadTimeoutError, FileTooBigError):
             raise
         except Exception as e:
             last_err = e
@@ -82,9 +86,17 @@ def _timeout_hook_builder():
     start_time = time.time()
 
     def _hook(d: dict) -> None:
-        if d.get("status") == "downloading" and time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:
+        if d.get("status") != "downloading":
+            return
+        if time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:
             raise DownloadTimeoutError(
                 f"Превышен лимит времени скачивания ({DOWNLOAD_TIMEOUT_SEC} сек)"
+            )
+        downloaded = d.get("downloaded_bytes") or 0
+        if downloaded > MAX_FILESIZE_BYTES:
+            raise FileTooBigError(
+                f"Видео слишком большое ({downloaded / 1024 / 1024:.0f} МБ), "
+                f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ — скачивание прервано"
             )
 
     return _hook
@@ -104,34 +116,12 @@ def list_formats(url: str) -> dict:
         except Exception as e:
             return {"error": f"Не удалось получить информацию: {e}"}
 
-        codecs = set()
-        for f in info.get("formats", []):
-            vcodec = f.get("vcodec") or ""
-            if vcodec.startswith("h264"):
-                codecs.add("h264")
-            elif vcodec.startswith("h265") or "bytevc1" in (f.get("format_id") or ""):
-                codecs.add("h265")
-
-        formats = []
-        if "h264" in codecs:
-            formats.append(
-                {"height": 0, "format_id": "h264", "codec": "h264", "filesize": None}
-            )
-        if "h265" in codecs:
-            formats.append(
-                {"height": 0, "format_id": "h265", "codec": "h265", "filesize": None}
-            )
-        if not formats:
-            formats.append(
-                {"height": 0, "format_id": "best", "codec": None, "filesize": None}
-            )
-
         return {
             "ok": True,
             "platform": "tiktok",
             "title": info.get("title"),
             "duration_sec": info.get("duration"),
-            "formats": formats,
+            "formats": [{"height": 0, "format_id": "best", "filesize": None}],
         }
 
     try:
@@ -216,10 +206,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
 
     if platform == "tiktok" or not height:
         if platform == "tiktok":
-            if format_id == "h265":
-                fmt_sel = "best[vcodec^=h265]/best"
-            else:
-                fmt_sel = "best[vcodec^=h264]/best"
+            fmt_sel = "best"
             suffix = ""
         else:
             fmt_sel = "best"
@@ -243,6 +230,8 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
             with yt_dlp.YoutubeDL(opts) as ydl:
                 meta = _extract_info_with_retry(ydl, url, download=True)
         except DownloadTimeoutError as e:
+            return {"error": str(e)}
+        except FileTooBigError as e:
             return {"error": str(e)}
         except Exception as e:
             return {"error": f"Не удалось скачать: {e}"}
