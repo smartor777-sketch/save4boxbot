@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from bot.utils import extract_video, extract_youtube_url, extract_tiktok_url
+from bot.utils import extract_video, extract_youtube_url, extract_tiktok_url, extract_instagram_url
 
 cases = [
     # (вход, ожидаемый video_id или None) — YouTube
@@ -31,6 +31,18 @@ tiktok_cases = [
     "https://www.tiktok.com/@user/photo/1234567890123456789",
 ]
 
+instagram_cases = [
+    ("https://www.instagram.com/p/CxRvXyfMQKq/", True),
+    ("https://www.instagram.com/reel/Cy_SampleABC/", True),
+    ("https://www.instagram.com/reels/DbnbYM_NH3_/", True),
+    ("https://instagram.com/p/CxRvXyfMQKq/", True),
+    ("https://www.instagram.com/p/CxRvXyfMQKq/?utm_source=ig_web_copy_link", True),
+    ("смотри https://www.instagram.com/p/CxRvXyfMQKq/ тут", True),
+    ("https://www.instagram.com/nazarstchn/", False),
+    ("https://www.instagram.com", False),
+    ("https://www.facebook.com/p/123", False),
+]
+
 failed = 0
 for text, expected in cases:
     result = extract_youtube_url(text)
@@ -48,5 +60,13 @@ for text in tiktok_cases:
         failed += 1
     print(f"{status} | {text} -> tiktok={got}")
 
-print(f"\n{len(cases) + len(tiktok_cases) - failed}/{len(cases) + len(tiktok_cases)} passed")
+for text, expected in instagram_cases:
+    result = extract_instagram_url(text)
+    got = result is not None
+    status = "OK " if got == expected else "FAIL"
+    if got != expected:
+        failed += 1
+    print(f"{status} | {text} -> instagram={got}")
+
+print(f"\n{len(cases) + len(tiktok_cases) + len(instagram_cases) - failed}/{len(cases) + len(tiktok_cases) + len(instagram_cases)} passed")
 sys.exit(1 if failed else 0)

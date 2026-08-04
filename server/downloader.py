@@ -12,11 +12,16 @@ load_dotenv()
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 MAX_FILESIZE_BYTES = int(os.getenv("MAX_FILESIZE_MB", "50")) * 1024 * 1024
 
+COOKIE_FILE = os.getenv("COOKIE_FILE", "")
+
 CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_MIN", "30")) * 60
 FILE_MAX_AGE_SEC = CLEANUP_INTERVAL_SEC * 2
 
 YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)")
 TIKTOK_RE = re.compile(r"tiktok\.com")
+INSTAGRAM_RE = re.compile(r"instagram\.com")
+
+INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "4"))
 DOWNLOAD_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -61,17 +66,54 @@ def is_youtube(url: str) -> bool:
     return bool(YOUTUBE_RE.search(url or ""))
 
 
+def is_instagram(url: str) -> bool:
+    return bool(INSTAGRAM_RE.search(url or ""))
+
+
 def is_supported(url: str) -> str | None:
-    """Возвращает платформу ('youtube'/'tiktok') или None."""
+    """Возвращает платформу ('youtube'/'tiktok'/'instagram') или None."""
     if YOUTUBE_RE.search(url or ""):
         return "youtube"
     if TIKTOK_RE.search(url or ""):
         return "tiktok"
+    if INSTAGRAM_RE.search(url or ""):
+        return "instagram"
     return None
 
 
+def _media_kind(info: dict) -> str:
+    """'video' или 'image' — определяем по наличию видеоформатов."""
+    for f in info.get("formats") or []:
+        if f.get("vcodec") and f["vcodec"] != "none":
+            return "video"
+    return "image"
+
+
+def _instagram_title(username: str | None, kinds: set[str]) -> str:
+    """Человеческий заголовок поста по типам медиа (не 'Video by')."""
+    if "video" in kinds:
+        label = "Видео"
+    elif kinds == {"image"}:
+        label = "Фото"
+    else:
+        label = "Пост"
+    return f"{label} от {username}" if username else label
+
+
+def _clean_instagram_name(name: str, kind: str) -> str:
+    """Заменяем 'Video by X' в имени файла на 'Видео/Фото от X'."""
+    label = "Видео" if kind == "video" else "Фото"
+    ext = os.path.splitext(name)[1]
+    base = os.path.splitext(name)[0]
+    for old in ("Video by", "Photo by", "Post by"):
+        if base.startswith(old):
+            base = f"{label} от {base[len(old):].lstrip()}"
+            break
+    return base + ext
+
+
 def _base_opts(output_template: str) -> dict:
-    return {
+    opts = {
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": True,
@@ -80,6 +122,36 @@ def _base_opts(output_template: str) -> dict:
         "retries": 2,
         "fragment_retries": 2,
     }
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        opts["cookiefile"] = COOKIE_FILE
+    return opts
+
+
+def _instagram_opts(output_template: str) -> dict:
+    """Опции для Instagram: фото-посты не должны ронять экстракцию."""
+    opts = _base_opts(output_template)
+    opts["ignore_no_formats_error"] = True
+    return opts
+
+
+def _instagram_entry_format(entry: dict) -> str:
+    """Видео-элемент качаем 'best', фото — по format_id (img-best)."""
+    formats = entry.get("formats") or []
+    if any(f.get("vcodec") and f["vcodec"] != "none" for f in formats):
+        return "best"
+    return "img-best/best"
+
+
+def _first_downloaded_path(info: dict) -> str | None:
+    """Путь первого скачанного файла из result_info."""
+    dl = []
+    for e in info.get("entries") or []:
+        dl.extend((e or {}).get("requested_downloads") or [])
+    if not dl:
+        dl = info.get("requested_downloads") or []
+    if dl and dl[0].get("filepath"):
+        return dl[0]["filepath"]
+    return None
 
 
 def _timeout_hook_builder():
@@ -119,7 +191,37 @@ def list_formats(url: str) -> dict:
 
     platform = is_supported(url)
     if not platform:
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram)"}
+
+    if platform == "instagram":
+        try:
+            with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
+                info = _extract_info_with_retry(ydl, url, download=False)
+        except Exception as e:
+            return {"error": f"Не удалось получить информацию: {e}"}
+
+        entries = info.get("entries")
+        if entries:
+            media = [
+                {"index": i, "kind": _media_kind(e)}
+                for i, e in enumerate(entries)
+                if e
+            ]
+        else:
+            media = [{"index": 0, "kind": _media_kind(info)}]
+
+        username = info.get("channel") or info.get("uploader")
+        title = _instagram_title(username, {m["kind"] for m in media})
+
+        return {
+            "ok": True,
+            "platform": "instagram",
+            "title": title,
+            "duration_sec": info.get("duration"),
+            "media_count": len(media),
+            "media": media,
+            "is_carousel": bool(entries),
+        }
 
     if platform == "tiktok":
         try:
@@ -213,7 +315,7 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
     import yt_dlp
 
     if not is_supported(url):
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram)"}
 
     if not DOWNLOAD_SEM.acquire(blocking=False):
         return {
@@ -227,10 +329,86 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
         DOWNLOAD_SEM.release()
 
 
+def _do_download_instagram(url: str) -> dict:
+    import yt_dlp
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
+                meta = _extract_info_with_retry(ydl, url, download=False)
+        except Exception as e:
+            return {"error": f"Не удалось получить информацию: {e}"}
+
+        entries = meta.get("entries") or []
+        items = [e for e in entries if e] if entries else [meta]
+        if not items:
+            return {"error": "Файл не был создан"}
+
+        tmp_dir = os.path.join(tmp, "dl")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        results = []
+        for idx, entry in enumerate(items, start=1):
+            fmt_sel = _instagram_entry_format(entry)
+            opts = _instagram_opts(
+                os.path.join(tmp_dir, f"%(title).100B [%(id)s]_{idx}.%(ext)s")
+            )
+            opts["format"] = fmt_sel
+            opts["playlist_items"] = str(idx)
+            opts["progress_hooks"] = [_timeout_hook_builder()]
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = _extract_info_with_retry(ydl, url, download=True)
+            except DownloadTimeoutError as e:
+                return {"error": str(e)}
+            except FileTooBigError as e:
+                return {"error": str(e)}
+            except Exception as e:
+                return {"error": f"Не удалось скачать: {e}"}
+
+            src = _first_downloaded_path(info)
+            if not src or not os.path.exists(src):
+                return {"error": f"Файл не был создан ({idx})"}
+
+            target = os.path.join(DOWNLOAD_DIR, os.path.basename(src))
+            shutil.move(src, target)
+            ext = os.path.splitext(target)[1].lower()
+            kind = "image" if ext in INSTAGRAM_IMAGE_EXTS else "video"
+            clean = _clean_instagram_name(os.path.basename(target), kind)
+            if clean != os.path.basename(target):
+                clean_target = os.path.join(DOWNLOAD_DIR, clean)
+                os.rename(target, clean_target)
+                target = clean_target
+            results.append({"filename": os.path.basename(target), "kind": kind})
+
+        total = sum(
+            os.path.getsize(os.path.join(DOWNLOAD_DIR, r["filename"])) for r in results
+        )
+        if total > MAX_FILESIZE_BYTES:
+            return {
+                "error": (
+                    f"Пост слишком большой ({total / 1024 / 1024:.0f} МБ), "
+                    f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ"
+                )
+            }
+
+        username = meta.get("channel") or meta.get("uploader")
+        title = _instagram_title(username, {r["kind"] for r in results})
+
+        return {
+            "ok": True,
+            "title": title,
+            "files": results,
+        }
+
+
 def _do_download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
     import yt_dlp
 
     platform = is_supported(url)
+
+    if platform == "instagram":
+        return _do_download_instagram(url)
 
     if platform == "tiktok" or not height:
         if platform == "tiktok":

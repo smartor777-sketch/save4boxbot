@@ -8,6 +8,18 @@ from . import downloader
 
 app = FastAPI(title="YT Download Server")
 
+_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+}
+
 
 class DownloadRequest(BaseModel):
     url: str
@@ -44,6 +56,7 @@ def download(req: DownloadRequest):
         "title": result.get("title"),
         "duration_min": result.get("duration_min"),
         "filename": result.get("filename"),
+        "files": result.get("files"),
     }
 
 
@@ -54,7 +67,8 @@ def get_file(filename: str):
     path = Path(downloader.DOWNLOAD_DIR) / filename
     if not path.exists():
         return JSONResponse(status_code=404, content={"ok": False, "error": "Файл не найден"})
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    media_type = _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @app.get("/health")
