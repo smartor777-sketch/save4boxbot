@@ -23,11 +23,13 @@ def _mb(size):
 def _format_label(fmt: dict) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
+    codec = fmt.get("codec")
+    codec_txt = f" · {codec}" if codec else ""
     if height == 0:
         return "⬇️ Скачать видео"
     if size is None:
-        return f"{height}p · ~размер"
-    label = f"{height}p · {_mb(size)} МБ"
+        return f"{height}p{codec_txt} · ~размер"
+    label = f"{height}p{codec_txt} · {_mb(size)} МБ"
     if size > SLOW_SIZE:
         label += " (долго)"
     return label

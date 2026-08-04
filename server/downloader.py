@@ -102,6 +102,18 @@ def _timeout_hook_builder():
     return _hook
 
 
+def _codec_rank(vcodec: str | None) -> int:
+    """Приоритет кодеков, совпадающий с yt-dlp при выборе bestvideo."""
+    v = (vcodec or "").lower()
+    if v.startswith("av01") or v.startswith("av1"):
+        return 3
+    if v.startswith("vp9") or v.startswith("hevc") or v.startswith("h265"):
+        return 2
+    if v.startswith("h264") or v.startswith("avc"):
+        return 1
+    return 0
+
+
 def list_formats(url: str) -> dict:
     import yt_dlp
 
@@ -141,13 +153,16 @@ def list_formats(url: str) -> dict:
             size = f.get("filesize") or f.get("filesize_approx")
             tbr = f.get("tbr") or 0
             progressive = bool(acodec and acodec != "none")
+            rank = _codec_rank(vcodec)
             cur = by_height.get(height)
-            if cur is None or tbr > cur.get("tbr", 0):
+            if cur is None or (rank, tbr) > (cur.get("rank", 0), cur.get("tbr", 0)):
                 by_height[height] = {
                     "height": height,
                     "format_id": f["format_id"],
                     "size": size,
                     "tbr": tbr,
+                    "rank": rank,
+                    "vcodec": vcodec,
                     "progressive": progressive,
                 }
         elif vcodec == "none" and acodec and acodec != "none":
@@ -155,6 +170,17 @@ def list_formats(url: str) -> dict:
 
     known_audio = [s for s in audio_sizes if s]
     best_audio_size = max(known_audio) if known_audio else None
+
+    codec_names = {
+        "av01": "AV1",
+        "av1": "AV1",
+        "vp9": "VP9",
+        "h265": "H.265",
+        "hevc": "H.265",
+        "h264": "H.264",
+        "avc1": "H.264",
+        "avc": "H.264",
+    }
 
     formats = []
     for h in sorted(by_height):
@@ -164,11 +190,13 @@ def list_formats(url: str) -> dict:
             total = vid_size
         else:
             total = (vid_size + best_audio_size) if best_audio_size is not None else None
+        codec = codec_names.get(fmt["vcodec"].split(".")[0], fmt["vcodec"].upper())
         formats.append(
             {
                 "height": h,
                 "format_id": fmt["format_id"],
                 "filesize": total,
+                "codec": codec,
             }
         )
 
