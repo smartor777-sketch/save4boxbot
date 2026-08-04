@@ -16,8 +16,12 @@ HARD_CAP = 45 * 1024 * 1024  # выше этого качество не пре�
 URLS: dict[str, str] = {}
 
 
-def _mb(size):
-    return round(size / 1024 / 1024)
+def _size_label(size):
+    if size >= 1024 * 1024:
+        return f"{round(size / 1024 / 1024)} МБ"
+    if size >= 1024:
+        return f"{round(size / 1024)} КБ"
+    return f"{size} Б"
 
 
 def _format_label(fmt: dict) -> str:
@@ -29,7 +33,7 @@ def _format_label(fmt: dict) -> str:
         return "⬇️ Скачать видео"
     if size is None:
         return f"{height}p{codec_txt} · ~размер"
-    label = f"{height}p{codec_txt} · {_mb(size)} МБ"
+    label = f"{height}p{codec_txt} · {_size_label(size)}"
     if size > SLOW_SIZE:
         label += " (долго)"
     return label
