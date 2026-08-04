@@ -56,6 +56,7 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="❌ Отменить",
                 callback_data=f"cancel:{key}",
+                style="danger",
             )
         ]
     )
