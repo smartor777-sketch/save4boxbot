@@ -74,7 +74,7 @@ def _allowed(formats: list[dict]) -> list[dict]:
 async def start(message: types.Message):
     await message.answer(
         "👋 Привет! Пришли ссылку на YouTube (или TikTok), и я скачаю его сюда "
-        "(до 1080p, лимит 50 МБ)."
+        "(размер файла до 50 МБ)."
     )
 
 
