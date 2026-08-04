@@ -47,6 +47,26 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _build_tiktok_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
+    labels = {
+        "h264": "H.264 · совместимый",
+        "h265": "H.265 · выше качество",
+        "best": "⬇️ Скачать видео",
+    }
+    rows = []
+    for fmt in formats:
+        codec = fmt.get("codec") or "best"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=labels.get(codec, codec),
+                    callback_data=f"fmt:{key}:{codec}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _allowed(formats: list[dict]) -> list[dict]:
     return [
         f for f in formats
@@ -95,6 +115,11 @@ async def handle_text(message: types.Message):
     URLS[key] = url
     title = body.get("title", "Видео")
 
+    if body.get("platform") == "tiktok":
+        kb = _build_tiktok_keyboard(available, key)
+        await status.edit_text(f"🎬 {title}\n\nВыбери версию:", reply_markup=kb)
+        return
+
     if len(available) == 1 and available[0]["height"] == 0:
         await _download_and_send(status, key, 0)
         return
@@ -106,27 +131,36 @@ async def handle_text(message: types.Message):
 @router.callback_query(F.data.startswith("fmt:"))
 async def handle_format(callback: types.CallbackQuery):
     await callback.answer()
-    _, key, height = callback.data.split(":")
+    _, key, target = callback.data.split(":")
     url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    await _download_and_send(callback.message, key, int(height))
+    height = 0 if target in ("h264", "h265") else int(target)
+    format_id = target if target in ("h264", "h265") else None
+    await _download_and_send(callback.message, key, height, format_id)
 
 
-async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
+async def _download_and_send(
+    msg: types.Message, key: str, height: int, format_id: str | None = None
+) -> None:
     url = URLS.get(key)
     if not url:
         await msg.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    height_label = "видео" if height == 0 else f"{height}p"
+    height_label = {
+        "h264": "H.264",
+        "h265": "H.265",
+    }.get(format_id, "видео" if height == 0 else f"{height}p")
     await msg.edit_text(f"⏳ Скачиваю {height_label}…")
     timeout = httpx.Timeout(300.0, connect=10.0)
 
     payload = {"url": url}
-    if height != 0:
+    if format_id:
+        payload["format_id"] = format_id
+    elif height != 0:
         payload["height"] = height
 
     try:
@@ -145,7 +179,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 [
                     InlineKeyboardButton(
                         text="🔄 Попробовать ещё раз",
-                        callback_data=f"fmt:{key}:{height}",
+                        callback_data=f"fmt:{key}:{format_id or height}",
                     )
                 ]
             ]

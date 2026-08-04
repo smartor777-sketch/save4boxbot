@@ -103,12 +103,35 @@ def list_formats(url: str) -> dict:
                 info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
             return {"error": f"Не удалось получить информацию: {e}"}
+
+        codecs = set()
+        for f in info.get("formats", []):
+            vcodec = f.get("vcodec") or ""
+            if vcodec.startswith("h264"):
+                codecs.add("h264")
+            elif vcodec.startswith("h265") or "bytevc1" in (f.get("format_id") or ""):
+                codecs.add("h265")
+
+        formats = []
+        if "h264" in codecs:
+            formats.append(
+                {"height": 0, "format_id": "h264", "codec": "h264", "filesize": None}
+            )
+        if "h265" in codecs:
+            formats.append(
+                {"height": 0, "format_id": "h265", "codec": "h265", "filesize": None}
+            )
+        if not formats:
+            formats.append(
+                {"height": 0, "format_id": "best", "codec": None, "filesize": None}
+            )
+
         return {
             "ok": True,
             "platform": "tiktok",
             "title": info.get("title"),
             "duration_sec": info.get("duration"),
-            "formats": [{"height": 0, "format_id": "best", "filesize": None}],
+            "formats": formats,
         }
 
     try:
@@ -168,7 +191,7 @@ def list_formats(url: str) -> dict:
     }
 
 
-def download(url: str, height: int | None = None) -> dict:
+def download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
     import yt_dlp
 
     if not is_supported(url):
@@ -181,19 +204,22 @@ def download(url: str, height: int | None = None) -> dict:
         }
 
     try:
-        return _do_download(url, height)
+        return _do_download(url, height, format_id)
     finally:
         DOWNLOAD_SEM.release()
 
 
-def _do_download(url: str, height: int | None = None) -> dict:
+def _do_download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
     import yt_dlp
 
     platform = is_supported(url)
 
     if platform == "tiktok" or not height:
         if platform == "tiktok":
-            fmt_sel = "best[vcodec^=h264]/best"
+            if format_id == "h265":
+                fmt_sel = "best[vcodec^=h265]/best"
+            else:
+                fmt_sel = "best[vcodec^=h264]/best"
             suffix = ""
         else:
             fmt_sel = "best"

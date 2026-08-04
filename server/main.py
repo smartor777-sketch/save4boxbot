@@ -12,6 +12,7 @@ app = FastAPI(title="YT Download Server")
 class DownloadRequest(BaseModel):
     url: str
     height: int | None = None
+    format_id: str | None = None
 
 
 class FormatsRequest(BaseModel):
@@ -25,6 +26,7 @@ def formats(req: FormatsRequest):
         return {"ok": False, "error": result["error"]}
     return {
         "ok": True,
+        "platform": result.get("platform"),
         "title": result.get("title"),
         "duration_sec": result.get("duration_sec"),
         "formats": result.get("formats", []),
@@ -33,7 +35,7 @@ def formats(req: FormatsRequest):
 
 @app.post("/download")
 def download(req: DownloadRequest):
-    result = downloader.download(req.url, req.height)
+    result = downloader.download(req.url, req.height, req.format_id)
     if result.get("busy"):
         return JSONResponse(status_code=503, content={"ok": False, "error": result["error"]})
     if result.get("error"):
