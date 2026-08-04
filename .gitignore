@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 downloads/
+test_downloads/
 .env
 .venv/
 venv/
