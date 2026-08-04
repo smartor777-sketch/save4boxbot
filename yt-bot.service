@@ -1,0 +1,13 @@
+[Unit]
+Description=YT Save Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/yt-bot
+ExecStart=/opt/yt-bot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/yt-bot/.env
+
+[Install]
+WantedBy=multi-user.target
