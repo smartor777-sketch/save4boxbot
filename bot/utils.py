@@ -4,14 +4,16 @@ import re
 URL_RE = re.compile(r"https?://[^\s]+")
 
 # Извлекаем ID видео из разных форматов YouTube
-_SHORTS_RE = re.compile(r"youtube\.com/shorts/([\w\-]+)")
+_SHORTS_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/shorts/([\w\-]+)")
+_LIVE_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/live/([\w\-]+)")
+_EMBED_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/embed/([\w\-]+)")
+_PATH_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/v/([\w\-]+)")
 _WATCH_RE = re.compile(r"[?&]v=([\w\-]+)")
 _YOUTU_RE = re.compile(r"youtu\.be/([\w\-]+)")
-_LIVE_RE = re.compile(r"youtube\.com/live/([\w\-]+)")
 
 
 def _video_id_from(url: str) -> str | None:
-    for pattern in (_SHORTS_RE, _LIVE_RE):
+    for pattern in (_SHORTS_RE, _LIVE_RE, _EMBED_RE, _PATH_RE):
         m = pattern.search(url)
         if m:
             return m.group(1)
