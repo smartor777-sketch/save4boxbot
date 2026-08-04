@@ -158,7 +158,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
 
     if not body.get("ok"):
         error = body.get("error", "Неизвестная ошибка")
-        if "слишком большое" in error:
+        if "слишком большое" in error and height != 0:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
