@@ -94,6 +94,11 @@ async def handle_text(message: types.Message):
 
     URLS[key] = url
     title = body.get("title", "Видео")
+
+    if len(available) == 1 and available[0]["height"] == 0:
+        await _download_and_send(status, key, 0)
+        return
+
     kb = _build_keyboard(available, key)
     await status.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
 
@@ -107,14 +112,22 @@ async def handle_format(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    msg = callback.message
-    height_label = "видео" if height == "0" else f"{height}p"
+    await _download_and_send(callback.message, key, int(height))
+
+
+async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
+    url = URLS.get(key)
+    if not url:
+        await msg.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
+        return
+
+    height_label = "видео" if height == 0 else f"{height}p"
     await msg.edit_text(f"⏳ Скачиваю {height_label}…")
     timeout = httpx.Timeout(300.0, connect=10.0)
 
     payload = {"url": url}
-    if height != "0":
-        payload["height"] = int(height)
+    if height != 0:
+        payload["height"] = height
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -220,4 +233,7 @@ async def rechoose(callback: types.CallbackQuery):
         return
 
     kb = _build_keyboard(available, key)
+    if len(available) == 1 and available[0]["height"] == 0:
+        await _download_and_send(msg, key, 0)
+        return
     await msg.edit_text(f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", reply_markup=kb)
