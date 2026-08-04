@@ -51,10 +51,10 @@ def download(req: DownloadRequest):
 @app.get("/file/{filename}")
 def get_file(filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
-        return {"ok": False, "error": "Некорректное имя файла"}
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Некорректное имя файла"})
     path = Path(downloader.DOWNLOAD_DIR) / filename
     if not path.exists():
-        return {"ok": False, "error": "Файл не найден"}
+        return JSONResponse(status_code=404, content={"ok": False, "error": "Файл не найден"})
     return FileResponse(path, media_type="video/mp4", filename=filename)
 
 

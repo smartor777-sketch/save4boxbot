@@ -1,6 +1,7 @@
 import httpx
 from aiogram import F, Router, types
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from urllib.parse import quote
 
 from . import config
 from .utils import extract_video
@@ -219,7 +220,7 @@ async def _download_and_send(
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{config.SERVER_URL}/file/{filename}")
+            resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
             resp.raise_for_status()
             video = resp.content
     except httpx.HTTPError as e:
