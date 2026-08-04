@@ -1,3 +1,4 @@
+import hashlib
 import re
 
 # Полный URL до первых пробелов/знаков переноса
@@ -10,6 +11,15 @@ _EMBED_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/embed/([\w\-]+)")
 _PATH_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/v/([\w\-]+)")
 _WATCH_RE = re.compile(r"[?&]v=([\w\-]+)")
 _YOUTU_RE = re.compile(r"youtu\.be/([\w\-]+)")
+
+# TikTok ссылки
+_TIKTOK_VIDEO_RE = re.compile(
+    r"(?:www\.|vm\.|vt\.)?tiktok\.com/.*?/video/(\d+)"
+)
+_TIKTOK_PHOTO_RE = re.compile(
+    r"(?:www\.|vm\.|vt\.)?tiktok\.com/.*?/photo/(\d+)"
+)
+_TIKTOK_SHORT_RE = re.compile(r"(?:vm\.|vt\.)tiktok\.com/\S+")
 
 
 def _video_id_from(url: str) -> str | None:
@@ -38,3 +48,37 @@ def extract_youtube_url(text: str) -> tuple[str, str] | None:
         return None
 
     return f"https://www.youtube.com/watch?v={video_id}", video_id
+
+
+def extract_tiktok_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL, короткий ключ) для TikTok или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    is_tiktok = ".tiktok.com" in raw
+    if not is_tiktok:
+        return None
+    if not (
+        _TIKTOK_VIDEO_RE.search(raw)
+        or _TIKTOK_PHOTO_RE.search(raw)
+        or _TIKTOK_SHORT_RE.search(raw)
+    ):
+        return None
+
+    key = hashlib.md5(raw.encode()).hexdigest()[:10]
+    return raw, key
+
+
+def extract_video(text: str) -> tuple[str, str, str] | None:
+    """Возвращает (platform, url, key) или None."""
+    parsed = extract_youtube_url(text)
+    if parsed:
+        url, key = parsed
+        return "youtube", url, key
+    parsed = extract_tiktok_url(text)
+    if parsed:
+        url, key = parsed
+        return "tiktok", url, key
+    return None

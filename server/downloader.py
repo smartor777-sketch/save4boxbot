@@ -16,6 +16,7 @@ CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_MIN", "30")) * 60
 FILE_MAX_AGE_SEC = CLEANUP_INTERVAL_SEC * 2
 
 YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)")
+TIKTOK_RE = re.compile(r"tiktok\.com")
 
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "4"))
 DOWNLOAD_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -32,6 +33,15 @@ class DownloadTimeoutError(Exception):
 
 def is_youtube(url: str) -> bool:
     return bool(YOUTUBE_RE.search(url or ""))
+
+
+def is_supported(url: str) -> str | None:
+    """Возвращает платформу ('youtube'/'tiktok') или None."""
+    if YOUTUBE_RE.search(url or ""):
+        return "youtube"
+    if TIKTOK_RE.search(url or ""):
+        return "tiktok"
+    return None
 
 
 def _base_opts(output_template: str) -> dict:
@@ -60,8 +70,23 @@ def _timeout_hook_builder():
 def list_formats(url: str) -> dict:
     import yt_dlp
 
-    if not is_youtube(url):
-        return {"error": "Ссылка не похожа на YouTube"}
+    platform = is_supported(url)
+    if not platform:
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok)"}
+
+    if platform == "tiktok":
+        try:
+            with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            return {"error": f"Не удалось получить информацию: {e}"}
+        return {
+            "ok": True,
+            "platform": "tiktok",
+            "title": info.get("title"),
+            "duration_sec": info.get("duration"),
+            "formats": [{"height": 0, "format_id": "best", "filesize": None}],
+        }
 
     try:
         with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
@@ -113,6 +138,7 @@ def list_formats(url: str) -> dict:
 
     return {
         "ok": True,
+        "platform": "youtube",
         "title": info.get("title"),
         "duration_sec": info.get("duration"),
         "formats": formats,
@@ -122,8 +148,8 @@ def list_formats(url: str) -> dict:
 def download(url: str, height: int | None = None) -> dict:
     import yt_dlp
 
-    if not is_youtube(url):
-        return {"error": "Ссылка не похожа на YouTube"}
+    if not is_supported(url):
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok)"}
 
     if not DOWNLOAD_SEM.acquire(blocking=False):
         return {
@@ -140,12 +166,14 @@ def download(url: str, height: int | None = None) -> dict:
 def _do_download(url: str, height: int | None = None) -> dict:
     import yt_dlp
 
-    if height:
+    platform = is_supported(url)
+
+    if platform == "tiktok" or not height:
+        fmt_sel = "best"
+        suffix = "" if platform == "tiktok" else "_720p"
+    else:
         fmt_sel = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
         suffix = f"_{height}p"
-    else:
-        fmt_sel = "best[height<=720]/best"
-        suffix = "_720p"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = os.path.join(tmp, "dl")

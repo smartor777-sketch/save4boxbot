@@ -3,7 +3,7 @@ from aiogram import F, Router, types
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import config
-from .utils import extract_youtube_url
+from .utils import extract_video
 
 router = Router()
 
@@ -11,7 +11,7 @@ MAX_FILESIZE = 50 * 1024 * 1024  # лимит Telegram
 SLOW_SIZE = 30 * 1024 * 1024  # выше этого — помечаем «долго»
 HARD_CAP = 45 * 1024 * 1024  # выше этого качество не предлагаем
 
-# video_id -> canonical url (храним, т.к. в callback_data не влезает полный URL)
+# key (video_id / hash) -> canonical url (в callback_data не влезает полный URL)
 URLS: dict[str, str] = {}
 
 
@@ -22,6 +22,8 @@ def _mb(size):
 def _format_label(fmt: dict) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
+    if height == 0:
+        return "⬇️ Скачать видео"
     if size is None:
         return f"{height}p · ~размер"
     label = f"{height}p · {_mb(size)} МБ"
@@ -30,7 +32,7 @@ def _format_label(fmt: dict) -> str:
     return label
 
 
-def _build_keyboard(formats: list[dict], video_id: str) -> InlineKeyboardMarkup:
+def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
     rows = []
     for fmt in formats:
         if fmt.get("filesize") is None or fmt["filesize"] <= HARD_CAP:
@@ -38,7 +40,7 @@ def _build_keyboard(formats: list[dict], video_id: str) -> InlineKeyboardMarkup:
                 [
                     InlineKeyboardButton(
                         text=_format_label(fmt),
-                        callback_data=f"fmt:{video_id}:{fmt['height']}",
+                        callback_data=f"fmt:{key}:{fmt['height']}",
                     )
                 ]
             )
@@ -55,17 +57,17 @@ def _allowed(formats: list[dict]) -> list[dict]:
 @router.message(F.text == "/start")
 async def start(message: types.Message):
     await message.answer(
-        "👋 Привет! Пришли ссылку на YouTube-ролик, и я скачаю его сюда "
+        "👋 Привет! Пришли ссылку на YouTube (или TikTok), и я скачаю его сюда "
         "(до 1080p, лимит 50 МБ)."
     )
 
 
 @router.message(F.text)
 async def handle_text(message: types.Message):
-    parsed = extract_youtube_url(message.text)
+    parsed = extract_video(message.text)
     if not parsed:
         return
-    url, video_id = parsed
+    platform, url, key = parsed
 
     status = await message.answer("⏳ Проверяю доступные форматы…")
     timeout = httpx.Timeout(120.0, connect=10.0)
@@ -90,30 +92,34 @@ async def handle_text(message: types.Message):
         )
         return
 
-    URLS[video_id] = url
+    URLS[key] = url
     title = body.get("title", "Видео")
-    kb = _build_keyboard(available, video_id)
+    kb = _build_keyboard(available, key)
     await status.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("fmt:"))
 async def handle_format(callback: types.CallbackQuery):
     await callback.answer()
-    _, video_id, height = callback.data.split(":")
-    url = URLS.get(video_id)
+    _, key, height = callback.data.split(":")
+    url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
     msg = callback.message
-    await msg.edit_text(f"⏳ Скачиваю {height}p…")
+    height_label = "видео" if height == "0" else f"{height}p"
+    await msg.edit_text(f"⏳ Скачиваю {height_label}…")
     timeout = httpx.Timeout(300.0, connect=10.0)
+
+    payload = {"url": url}
+    if height != "0":
+        payload["height"] = int(height)
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
-                f"{config.SERVER_URL}/download",
-                json={"url": url, "height": int(height)},
+                f"{config.SERVER_URL}/download", json=payload
             )
             body = resp.json()
     except httpx.HTTPError as e:
@@ -126,7 +132,7 @@ async def handle_format(callback: types.CallbackQuery):
                 [
                     InlineKeyboardButton(
                         text="🔄 Попробовать ещё раз",
-                        callback_data=f"fmt:{video_id}:{height}",
+                        callback_data=f"fmt:{key}:{height}",
                     )
                 ]
             ]
@@ -145,7 +151,7 @@ async def handle_format(callback: types.CallbackQuery):
                     [
                         InlineKeyboardButton(
                             text="↩️ Выбрать меньшее качество",
-                            callback_data=f"rechoose:{video_id}",
+                            callback_data=f"rechoose:{key}",
                         )
                     ]
                 ]
@@ -187,8 +193,8 @@ async def handle_format(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("rechoose:"))
 async def rechoose(callback: types.CallbackQuery):
     await callback.answer()
-    video_id = callback.data.split(":", 1)[1]
-    url = URLS.get(video_id)
+    key = callback.data.split(":", 1)[1]
+    url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
@@ -213,5 +219,5 @@ async def rechoose(callback: types.CallbackQuery):
         )
         return
 
-    kb = _build_keyboard(available, video_id)
+    kb = _build_keyboard(available, key)
     await msg.edit_text(f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", reply_markup=kb)
