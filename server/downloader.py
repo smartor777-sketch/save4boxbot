@@ -31,6 +31,28 @@ class DownloadTimeoutError(Exception):
     pass
 
 
+class ExtractRetryError(Exception):
+    pass
+
+
+RETRY_ATTEMPTS = int(os.getenv("EXTRACT_RETRY_ATTEMPTS", "3"))
+RETRY_BACKOFF_SEC = float(os.getenv("EXTRACT_RETRY_BACKOFF_SEC", "2"))
+
+
+def _extract_info_with_retry(ydl, url: str, download: bool) -> dict:
+    last_err = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return ydl.extract_info(url, download=download)
+        except DownloadTimeoutError:
+            raise
+        except Exception as e:
+            last_err = e
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_BACKOFF_SEC * attempt)
+    raise last_err
+
+
 def is_youtube(url: str) -> bool:
     return bool(YOUTUBE_RE.search(url or ""))
 
@@ -49,6 +71,7 @@ def _base_opts(output_template: str) -> dict:
         "outtmpl": output_template,
         "noplaylist": True,
         "quiet": True,
+        "overwrites": True,
         "socket_timeout": SOCKET_TIMEOUT_SEC,
         "retries": 2,
         "fragment_retries": 2,
@@ -77,7 +100,7 @@ def list_formats(url: str) -> dict:
     if platform == "tiktok":
         try:
             with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
             return {"error": f"Не удалось получить информацию: {e}"}
         return {
@@ -90,7 +113,7 @@ def list_formats(url: str) -> dict:
 
     try:
         with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = _extract_info_with_retry(ydl, url, download=False)
     except Exception as e:
         return {"error": f"Не удалось получить информацию: {e}"}
 
@@ -169,8 +192,12 @@ def _do_download(url: str, height: int | None = None) -> dict:
     platform = is_supported(url)
 
     if platform == "tiktok" or not height:
-        fmt_sel = "best"
-        suffix = "" if platform == "tiktok" else "_720p"
+        if platform == "tiktok":
+            fmt_sel = "best[vcodec^=h264]/best"
+            suffix = ""
+        else:
+            fmt_sel = "best"
+            suffix = "_720p"
     else:
         fmt_sel = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
         suffix = f"_{height}p"
@@ -188,7 +215,7 @@ def _do_download(url: str, height: int | None = None) -> dict:
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                meta = ydl.extract_info(url, download=True)
+                meta = _extract_info_with_retry(ydl, url, download=True)
         except DownloadTimeoutError as e:
             return {"error": str(e)}
         except Exception as e:
