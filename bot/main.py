@@ -27,7 +27,10 @@ async def setup_bot_profile(bot: Bot) -> None:
         "Скачиваю видео и фото из YouTube, Instagram и TikTok."
     )
     await bot.set_my_commands(
-        [BotCommand(command="start", description="Приветствие и помощь")]
+        [
+            BotCommand(command="start", description="Приветствие и помощь"),
+            BotCommand(command="stats", description="Статистика за сегодня и за месяц"),
+        ]
     )
 
 

@@ -7,6 +7,8 @@ import time
 
 from dotenv import load_dotenv
 
+from . import stats
+
 load_dotenv()
 
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
@@ -324,7 +326,10 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
         }
 
     try:
-        return _do_download(url, height, format_id)
+        result = _do_download(url, height, format_id)
+        if "error" not in result:
+            stats.record_download(is_supported(url))
+        return result
     finally:
         DOWNLOAD_SEM.release()
 

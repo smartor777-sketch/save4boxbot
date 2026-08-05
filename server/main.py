@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import downloader
+from . import downloader, stats
 
 app = FastAPI(title="YT Download Server")
 
@@ -74,6 +74,11 @@ def get_file(filename: str):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/stats")
+def get_stats():
+    return {"ok": True, **stats.period_stats()}
 
 
 @app.get("/status")

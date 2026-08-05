@@ -87,6 +87,42 @@ async def start(message: types.Message):
     await message.answer(START_TEXT)
 
 
+@router.message(F.text == "/stats")
+async def stats(message: types.Message):
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=10.0)) as client:
+            resp = await client.get(f"{config.SERVER_URL}/stats")
+            body = resp.json()
+    except httpx.HTTPError:
+        await message.answer("❌ Не удалось получить статистику. Попробуйте позже.")
+        return
+
+    if not body.get("ok"):
+        await message.answer("❌ Не удалось получить статистику.")
+        return
+
+    today = body.get("today", {})
+    month = body.get("month", {})
+
+
+    def fmt(c):
+        return (
+            f"• YouTube — {c.get('youtube', 0)}\n"
+            f"• TikTok — {c.get('tiktok', 0)}\n"
+            f"• Instagram — {c.get('instagram', 0)}\n"
+            f"Всего: {c.get('total', 0)}"
+        )
+
+    text = (
+        "📊 Статистика за сегодня и за месяц\n\n"
+        "За сегодня:\n"
+        f"{fmt(today)}\n\n"
+        "За этот месяц:\n"
+        f"{fmt(month)}"
+    )
+    await message.answer(text)
+
+
 @router.message(F.text)
 async def handle_text(message: types.Message):
     if message.edit_date:
