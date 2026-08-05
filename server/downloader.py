@@ -124,6 +124,11 @@ def _base_opts(output_template: str) -> dict:
         "retries": 2,
         "fragment_retries": 2,
     }
+    impersonate = os.getenv("IMPERSONATE", "chrome").strip()
+    if impersonate:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        opts["impersonate"] = ImpersonateTarget.from_str(impersonate)
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
     return opts
