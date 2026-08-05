@@ -14,8 +14,8 @@ MAX_FILESIZE_BYTES = int(os.getenv("MAX_FILESIZE_MB", "50")) * 1024 * 1024
 
 COOKIE_FILE = os.getenv("COOKIE_FILE", "")
 
-CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_MIN", "30")) * 60
-FILE_MAX_AGE_SEC = CLEANUP_INTERVAL_SEC * 2
+CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_MIN", "15")) * 60
+FILE_MAX_AGE_SEC = int(os.getenv("FILE_MAX_AGE_MIN", "15")) * 60
 
 YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)")
 TIKTOK_RE = re.compile(r"tiktok\.com")
