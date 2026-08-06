@@ -5,3 +5,8 @@ test_downloads/
 .env
 .venv/
 venv/
+
+# Личные cookies-файлы — НИКОГДА не коммитить!
+cookies.txt
+*.cookies
+*.cookies.txt
