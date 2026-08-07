@@ -30,6 +30,37 @@ def _size_label(size):
     return f"{size} Б"
 
 
+_AGE_RESTRICTED_MARKS = (
+    "sign in to confirm your age",
+    "age-restricted",
+    "inappropriate for some users",
+    "age restricted",
+)
+_COOKIE_INVALID_MARKS = (
+    "no longer valid",
+    "cookie is invalid",
+    "cookie_invalid",
+)
+
+
+def _friendly_error(error) -> str:
+    """Превращает сырые ошибки yt-dlp в осмысленные сообщения для пользователя."""
+    if not error:
+        return "Неизвестная ошибка"
+    text = str(error).lower()
+    if any(m in text for m in _AGE_RESTRICTED_MARKS):
+        return (
+            "🚫 Это видео с возрастным ограничением (18+).\n"
+            "Скачивание таких видео недоступно без подтверждённого аккаунта YouTube."
+        )
+    if any(m in text for m in _COOKIE_INVALID_MARKS):
+        return (
+            "⚠️ Куки YouTube устарели (YouTube ротирует сессии).\n"
+            "Возрастные видео временно недоступны, обычные работают без ограничений."
+        )
+    return str(error)
+
+
 def _format_label(fmt: dict) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
@@ -150,7 +181,7 @@ async def handle_text(message: types.Message):
         return
 
     if not body.get("ok"):
-        await status.edit_text(f"❌ {body.get('error', 'Неизвестная ошибка')}")
+        await status.edit_text(f"❌ {_friendly_error(body.get('error'))}")
         return
 
     URLS[key] = url
@@ -253,7 +284,7 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
 
     if not body.get("ok"):
         error = body.get("error", "Неизвестная ошибка")
-        await msg.edit_text(f"❌ {error}", reply_markup=retry_kb if "перегружен" in error else None)
+        await msg.edit_text(f"❌ {_friendly_error(error)}", reply_markup=retry_kb if "перегружен" in error else None)
         return
 
     files = body.get("files") or []
@@ -357,7 +388,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 reply_markup=kb,
             )
         else:
-            await msg.edit_text(f"❌ {error}")
+            await msg.edit_text(f"❌ {_friendly_error(error)}")
         return
 
     filename = body["filename"]
@@ -405,7 +436,7 @@ async def rechoose(callback: types.CallbackQuery):
         return
 
     if not body.get("ok"):
-        await msg.edit_text(f"❌ {body.get('error', 'Неизвестная ошибка')}")
+        await msg.edit_text(f"❌ {_friendly_error(body.get('error'))}")
         return
 
     available = _allowed(body["formats"])
