@@ -41,6 +41,20 @@ _COOKIE_INVALID_MARKS = (
     "cookie is invalid",
     "cookie_invalid",
 )
+_YANDEX_FAILURE_MARKS = (
+    "не удалось определить источник видео на странице превью",
+    "yandexvideo preview",
+    "yandexvideo",
+    "unable to extract data_raw",
+)
+_YT_BOT_CHECK_MARKS = (
+    "confirm you're not a bot",
+    "confirm you’re not a bot",
+    "not a bot",
+    "bot-check",
+    "n challenge solving failed",
+    "unable to solve n challenge",
+)
 
 
 def _friendly_error(error) -> str:
@@ -57,6 +71,17 @@ def _friendly_error(error) -> str:
         return (
             "⚠️ Куки YouTube устарели (YouTube ротирует сессии).\n"
             "Возрастные видео временно недоступны, обычные работают без ограничений."
+        )
+    if any(m in text for m in _YANDEX_FAILURE_MARKS):
+        return (
+            "🤖 Не удалось разобрать превью Яндекс Видео — Яндекс меняет разметку страницы.\n"
+            "Попробуйте отправить прямую ссылку на ролик с Rutube / ВК / YouTube."
+        )
+    if any(m in text for m in _YT_BOT_CHECK_MARKS):
+        return (
+            "🔒 YouTube требует подтвердить, что вы не бот (наш сервер попал под защиту).\n"
+            "Ссылки на короткие видео (Shorts) обычно работают. Ошибка временная — "
+            "скоро починим."
         )
     return str(error)
 
@@ -108,8 +133,10 @@ def _allowed(formats: list[dict]) -> list[dict]:
 
 
 START_TEXT = (
-    "👋 Привет! Пришли ссылку на YouTube, Instagram или TikTok, "
-    "и я скачаю его сюда (размер файла до 50 МБ)."
+    "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
+    "Rutube и Яндекс Видео прямо в Telegram.\n\n"
+    "Просто пришли ссылку на видео — и файл появится здесь "
+    "(размер до 50 МБ, при необходимости предложу выбрать качество)."
 )
 
 
@@ -141,6 +168,9 @@ async def stats(message: types.Message):
             f"• YouTube — {c.get('youtube', 0)}\n"
             f"• TikTok — {c.get('tiktok', 0)}\n"
             f"• Instagram — {c.get('instagram', 0)}\n"
+            f"• VK — {c.get('vk', 0)}\n"
+            f"• Rutube — {c.get('rutube', 0)}\n"
+            f"• Яндекс Видео — {c.get('yandex', 0)}\n"
             f"Всего: {c.get('total', 0)}"
         )
 
@@ -164,7 +194,8 @@ async def handle_text(message: types.Message):
             return
         await message.reply(
             "ℹ️ Это не похоже на ссылку для скачивания.\n"
-            "Пришли ссылку на видео или фото из YouTube, Instagram или TikTok."
+            "Пришли ссылку на видео из YouTube, Instagram, TikTok, "
+            "VK, Rutube или Яндекс Видео."
         )
         return
     platform, url, key = parsed

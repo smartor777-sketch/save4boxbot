@@ -11,11 +11,15 @@ logging.basicConfig(level=logging.INFO)
 
 
 BOT_DESCRIPTION = (
-    "Скачивает видео и фото из YouTube, Instagram и TikTok прямо в Telegram.\n\n"
+    "Скачивает видео и фото из YouTube, Instagram, TikTok, VK, Rutube "
+    "и Яндекс Видео прямо в Telegram.\n\n"
     "Что умеет:\n"
     "• YouTube — видео в лучшем качестве\n"
     "• Instagram — фото, видео и карусели\n"
-    "• TikTok — видео\n\n"
+    "• TikTok — видео\n"
+    "• VK — видео и клипы\n"
+    "• Rutube — видео\n"
+    "• Яндекс Видео — превью из поиска\n\n"
     "Как пользоваться: просто пришли ссылку на пост — и файл появится здесь.\n"
     "Максимальный размер файла — 50 МБ."
 )
@@ -24,7 +28,8 @@ BOT_DESCRIPTION = (
 async def setup_bot_profile(bot: Bot) -> None:
     await bot.set_my_description(BOT_DESCRIPTION)
     await bot.set_my_short_description(
-        "Скачиваю видео и фото из YouTube, Instagram и TikTok."
+        "Скачиваю видео и фото из YouTube, Instagram, TikTok, VK, Rutube "
+        "и Яндекс Видео."
     )
     await bot.set_my_commands(
         [

@@ -26,6 +26,21 @@ _TIKTOK_PHOTO_RE = re.compile(
 )
 _TIKTOK_SHORT_RE = re.compile(r"(?:vm\.|vt\.)tiktok\.com/\S+")
 
+# VK / VK Video ссылки (domains: vk.com, vk.ru, vkvideo.ru)
+_VK_DOMAIN_RE = re.compile(r"\bvk(?:video)?\.(?:com|ru)")
+_VK_VIDEO_RE = re.compile(r"/(?:video|clip)(-?\d+_\d+)")
+_VK_Z_RE = re.compile(r"[?&]z=(?:video|clip)(-?\d+_\d+)")
+
+# Яндекс Видео — ссылки на «превью» из поиска (filmId), в т.ч. мобильные /touch/
+_YANDEX_PREVIEW_RE = re.compile(
+    r"https?://(?:www\.)?yandex\.\w{2,3}(?:\.(?:am|ge|il|tr))?/video/(?:touch/)?preview"
+)
+
+# Rutube — одиночные видео и встраиваемые
+_RUTUBE_RE = re.compile(
+    r"rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/([\da-z]{32})"
+)
+
 
 def _video_id_from(url: str) -> str | None:
     for pattern in (_SHORTS_RE, _LIVE_RE, _EMBED_RE, _PATH_RE):
@@ -93,6 +108,51 @@ def extract_tiktok_url(text: str) -> tuple[str, str] | None:
     return raw, key
 
 
+def extract_vk_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (канонический VK-URL, video_id) или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    if not _VK_DOMAIN_RE.search(raw):
+        return None
+    m = _VK_VIDEO_RE.search(raw) or _VK_Z_RE.search(raw)
+    if not m:
+        return None
+
+    video_id = m.group(1)
+    return f"https://vk.com/video{video_id}", video_id
+
+
+def extract_yandex_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL превью, ключ) для Яндекс Видео или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    if not _YANDEX_PREVIEW_RE.search(raw):
+        return None
+
+    key = hashlib.md5(raw.encode()).hexdigest()[:10]
+    return raw, key
+
+
+def extract_rutube_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL видео, video_id) для Rutube или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    m = _RUTUBE_RE.search(raw)
+    if not m:
+        return None
+
+    return raw, m.group(1)
+
+
 def extract_video(text: str) -> tuple[str, str, str] | None:
     """Возвращает (platform, url, key) или None."""
     parsed = extract_youtube_url(text)
@@ -107,4 +167,16 @@ def extract_video(text: str) -> tuple[str, str, str] | None:
     if parsed:
         url, key = parsed
         return "tiktok", url, key
+    parsed = extract_vk_url(text)
+    if parsed:
+        url, key = parsed
+        return "vk", url, key
+    parsed = extract_yandex_url(text)
+    if parsed:
+        url, key = parsed
+        return "yandex", url, key
+    parsed = extract_rutube_url(text)
+    if parsed:
+        url, key = parsed
+        return "rutube", url, key
     return None

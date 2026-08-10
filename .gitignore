@@ -10,3 +10,9 @@ venv/
 cookies.txt
 *.cookies
 *.cookies.txt
+cookies.txt.bak*
+
+# Локальные служебные файлы
+stats.json
+*.bak
+prod_*.py

@@ -22,6 +22,12 @@ FILE_MAX_AGE_SEC = int(os.getenv("FILE_MAX_AGE_MIN", "15")) * 60
 YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)")
 TIKTOK_RE = re.compile(r"tiktok\.com")
 INSTAGRAM_RE = re.compile(r"instagram\.com")
+VK_RE = re.compile(
+    r"\bvk(?:video)?\.(?:com|ru)/(?:video|clip)(-?\d+_\d+)"
+    r"|\bvk(?:video)?\.(?:com|ru)/[^?\s]*\?.*?z=(?:video|clip)(-?\d+_\d+)"
+)
+RUTUBE_RE = re.compile(r"\brutube\.ru")
+YANDEX_VIDEO_RE = re.compile(r"\byandex\.\w{2,3}(?:\.(?:am|ge|il|tr))?/video/(?:touch/)?preview")
 
 INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -73,13 +79,20 @@ def is_instagram(url: str) -> bool:
 
 
 def is_supported(url: str) -> str | None:
-    """Возвращает платформу ('youtube'/'tiktok'/'instagram') или None."""
-    if YOUTUBE_RE.search(url or ""):
+    """Возвращает платформу ('youtube'/'tiktok'/'instagram'/'vk'/'rutube'/'yandex') или None."""
+    u = url or ""
+    if YOUTUBE_RE.search(u):
         return "youtube"
-    if TIKTOK_RE.search(url or ""):
+    if TIKTOK_RE.search(u):
         return "tiktok"
-    if INSTAGRAM_RE.search(url or ""):
+    if INSTAGRAM_RE.search(u):
         return "instagram"
+    if VK_RE.search(u):
+        return "vk"
+    if RUTUBE_RE.search(u):
+        return "rutube"
+    if YANDEX_VIDEO_RE.search(u):
+        return "yandex"
     return None
 
 
@@ -114,7 +127,19 @@ def _clean_instagram_name(name: str, kind: str) -> str:
     return base + ext
 
 
-def _base_opts(output_template: str) -> dict:
+CONCURRENT_FRAGMENTS = int(os.getenv("CONCURRENT_FRAGMENTS", "4"))
+# Чанки применяются только к YouTube (см. _base_opts), остальные платформы качают без них.
+HTTP_CHUNK_SIZE = int(os.getenv("HTTP_CHUNK_SIZE", "10485760"))
+
+# YouTube-клиенты в порядке приоритета. С датацентровых IP стоковый `web`
+# отдаёт "Sign in to confirm you're not a bot", а web_embedded/android/web_music
+# его обходят. Форматы всех клиентов сливаются yt-dlp в один список.
+YT_PLAYER_CLIENTS = [c.strip() for c in os.getenv(
+    "YT_PLAYER_CLIENTS", "web_embedded,android,web_music"
+).split(",") if c.strip()]
+
+
+def _base_opts(output_template: str, http_chunk_size: int | None = None) -> dict:
     opts = {
         "outtmpl": output_template,
         "noplaylist": True,
@@ -123,7 +148,15 @@ def _base_opts(output_template: str) -> dict:
         "socket_timeout": SOCKET_TIMEOUT_SEC,
         "retries": 2,
         "fragment_retries": 2,
+        "concurrent_fragment_downloads": CONCURRENT_FRAGMENTS,
     }
+    # Чанки (range-запросы) задаём только там, где они полезны: у YouTube большие
+    # single-file форматы, где чанк переживает обрыв соединения. У VK/Яндекса они
+    # ломают скачивание (Conflicting range), у Rutube/Instagram/TikTok бесполезны.
+    if http_chunk_size:
+        opts["http_chunk_size"] = http_chunk_size
+    if YT_PLAYER_CLIENTS:
+        opts["extractor_args"] = {"youtube": {"player_client": YT_PLAYER_CLIENTS}}
     impersonate = os.getenv("IMPERSONATE", "chrome").strip()
     if impersonate:
         from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -131,6 +164,13 @@ def _base_opts(output_template: str) -> dict:
         opts["impersonate"] = ImpersonateTarget.from_str(impersonate)
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
+    return opts
+
+
+def _tiktok_opts(output_template: str, http_chunk_size: int | None = None) -> dict:
+    """Опции для TikTok: глобальная имперсонация (curl_cffi) триггерит WAF-капчу."""
+    opts = _base_opts(output_template, http_chunk_size=http_chunk_size)
+    opts.pop("impersonate", None)
     return opts
 
 
@@ -198,7 +238,7 @@ def list_formats(url: str) -> dict:
 
     platform = is_supported(url)
     if not platform:
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Яндекс Видео)"}
 
     if platform == "instagram":
         try:
@@ -232,7 +272,7 @@ def list_formats(url: str) -> dict:
 
     if platform == "tiktok":
         try:
-            with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
+            with yt_dlp.YoutubeDL(_tiktok_opts("")) as ydl:
                 info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
             return {"error": f"Не удалось получить информацию: {e}"}
@@ -280,6 +320,10 @@ def list_formats(url: str) -> dict:
     known_audio = [s for s in audio_sizes if s]
     best_audio_size = max(known_audio) if known_audio else None
 
+    duration = info.get("duration")
+    audio_fmt = _chosen_audio(info.get("formats", []), platform)
+    audio_tbr = audio_fmt.get("tbr") if audio_fmt else None
+
     codec_names = {
         "av01": "AV1",
         "av1": "AV1",
@@ -295,11 +339,14 @@ def list_formats(url: str) -> dict:
     for h in sorted(by_height):
         fmt = by_height[h]
         vid_size = fmt["size"]
-        if fmt["progressive"] or vid_size is None:
-            total = vid_size
+        if fmt["progressive"]:
+            total = vid_size or _estimate_size(fmt["tbr"], None, duration)
+        elif vid_size is not None:
+            total = vid_size + (best_audio_size or 0)
         else:
-            total = (vid_size + best_audio_size) if best_audio_size is not None else None
-        codec = codec_names.get(fmt["vcodec"].split(".")[0], fmt["vcodec"].upper())
+            total = _estimate_size(fmt["tbr"], audio_tbr, duration)
+        vc = fmt["vcodec"] or ""
+        codec = codec_names.get(vc.split(".")[0], vc.upper())
         formats.append(
             {
                 "height": h,
@@ -311,7 +358,7 @@ def list_formats(url: str) -> dict:
 
     return {
         "ok": True,
-        "platform": "youtube",
+        "platform": platform,
         "title": info.get("title"),
         "duration_sec": info.get("duration"),
         "formats": formats,
@@ -322,7 +369,7 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
     import yt_dlp
 
     if not is_supported(url):
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Яндекс Видео)"}
 
     if not DOWNLOAD_SEM.acquire(blocking=False):
         return {
@@ -412,6 +459,49 @@ def _do_download_instagram(url: str) -> dict:
         }
 
 
+def _fmt_selector(platform: str, height: int | None) -> tuple[str, str]:
+    """Селектор формата и суффикс имени файла."""
+    # HLS (m3u8) у VK/Яндекса с серверных IP виснет на скачивании фрагментов,
+    # поэтому исключаем его и берём single-file DASH-форматы. Аудио капаем
+    # ~134 кбит/с (ближайшая ступенька VK), чтобы длинные ролики не раздувались
+    # сверх лимита 50 МБ.
+    no_hls = "[protocol!*=m3u8]" if platform in ("vk", "yandex") else ""
+    audio_cap = "[tbr<=136]" if platform in ("vk", "yandex") else ""
+
+    if platform == "tiktok":
+        return "best", ""
+    if not height:
+        return f"best{no_hls}/best", "_720p"
+    return (
+        f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}{audio_cap}"
+        f"/bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}"
+        f"/best[height<={height}]{no_hls}/best",
+        f"_{height}p",
+    )
+
+
+def _chosen_audio(formats: list[dict], platform: str) -> dict | None:
+    """Аудио-формат, который выберет селектор скачивания (для оценки размера)."""
+    audio = [
+        f for f in formats
+        if f.get("vcodec") == "none" and f.get("acodec") and f["acodec"] != "none"
+    ]
+    if platform in ("vk", "yandex"):
+        audio = [f for f in audio if not str(f.get("protocol") or "").startswith("m3u8")]
+        capped = [f for f in audio if (f.get("tbr") or 0) <= 136]
+        if capped:
+            audio = capped
+    return max(audio, key=lambda f: f.get("tbr") or 0) if audio else None
+
+
+def _estimate_size(v_tbr: float | None, a_tbr: float | None, duration: float | None) -> int | None:
+    """Оценка размера по битрейту, когда CDN не отдаёт filesize."""
+    if not duration or (v_tbr or 0) <= 0:
+        return None
+    kbps = v_tbr + (a_tbr or 0)
+    return int(kbps / 8 * duration * 1024)
+
+
 def _do_download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
     import yt_dlp
 
@@ -420,23 +510,16 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
     if platform == "instagram":
         return _do_download_instagram(url)
 
-    if platform == "tiktok" or not height:
-        if platform == "tiktok":
-            fmt_sel = "best"
-            suffix = ""
-        else:
-            fmt_sel = "best"
-            suffix = "_720p"
-    else:
-        fmt_sel = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
-        suffix = f"_{height}p"
+    fmt_sel, suffix = _fmt_selector(platform, height)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = os.path.join(tmp, "dl")
         os.makedirs(tmp_dir, exist_ok=True)
 
-        opts = _base_opts(
-            os.path.join(tmp_dir, f"%(title).100B [%(id)s]{suffix}.%(ext)s")
+        opts_fn = _tiktok_opts if platform == "tiktok" else _base_opts
+        opts = opts_fn(
+            os.path.join(tmp_dir, f"%(title).100B [%(id)s]{suffix}.%(ext)s"),
+            http_chunk_size=HTTP_CHUNK_SIZE if platform == "youtube" else None,
         )
         opts["format"] = fmt_sel
         opts["merge_output_format"] = "mp4"

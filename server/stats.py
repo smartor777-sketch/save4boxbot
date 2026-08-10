@@ -38,7 +38,7 @@ def record_download(platform: str) -> None:
 
 
 def _counts(day_data: dict) -> dict:
-    counts = {p: day_data.get(p, 0) for p in ("youtube", "tiktok", "instagram")}
+    counts = {p: day_data.get(p, 0) for p in ("youtube", "tiktok", "instagram", "vk", "rutube", "yandex")}
     counts["total"] = sum(counts.values())
     return counts
 
@@ -70,3 +70,4 @@ def prune() -> None:
         for k in old:
             del data[k]
         _write(data)
+

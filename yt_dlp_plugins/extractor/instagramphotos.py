@@ -50,3 +50,4 @@ class _InstagramPhotosIE(InstagramIE, plugin_name="instagramphotos"):
             )
         result["formats"] = formats
         return result
+
