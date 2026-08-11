@@ -463,7 +463,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
         caption += f"\n⏱ Длительность: ~{dur} мин"
 
     try:
-        await msg.answer_video(BufferedInputFile(video, filename=filename), caption=caption)
+        await msg.answer_video(video, caption=caption)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Не удалось отправить: {e}")
