@@ -1,7 +1,10 @@
+import os
+
 import httpx
 from aiogram import F, Router, types
 from aiogram.types import (
     BufferedInputFile,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
@@ -14,9 +17,18 @@ from .utils import extract_video
 
 router = Router()
 
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")  # сюда сервер сохраняет файлы
 MAX_FILESIZE = 50 * 1024 * 1024  # лимит Telegram
 SLOW_SIZE = 30 * 1024 * 1024  # выше этого — помечаем «долго»
 HARD_CAP = 45 * 1024 * 1024  # выше этого качество не предлагаем
+
+def _local_file_input(filename: str) -> FSInputFile | None:
+    """Файл уже лежит на диске сервера — отдаём путь вместо буфера в памяти."""
+    path = os.path.abspath(os.path.join(DOWNLOAD_DIR, os.path.basename(filename)))
+    if os.path.exists(path):
+        return FSInputFile(path, filename=filename)
+    return None
+
 
 # key (video_id / hash) -> canonical url (в callback_data не влезает полный URL)
 URLS: dict[str, str] = {}
@@ -327,16 +339,23 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
     emoji = "🎬" if first_kind == "video" else "📸"
     caption = f"{emoji} {body.get('title')}" if body.get("title") else "🎬 Видео"
     media_items = []
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for f in files:
-                r = await client.get(f"{config.SERVER_URL}/file/{quote(f['filename'])}")
-                r.raise_for_status()
-                bfile = BufferedInputFile(r.content, filename=f["filename"])
-                media_items.append((f["kind"], bfile))
-    except httpx.HTTPError as e:
-        await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
-        return
+    missing = []
+    for f in files:
+        local = _local_file_input(f["filename"])
+        if local is not None:
+            media_items.append((f["kind"], local))
+        else:
+            missing.append(f)
+    if missing:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for f in missing:
+                    r = await client.get(f"{config.SERVER_URL}/file/{quote(f['filename'])}")
+                    r.raise_for_status()
+                    media_items.append((f["kind"], BufferedInputFile(r.content, filename=f["filename"])))
+        except httpx.HTTPError as e:
+            await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
+            return
 
     try:
         if len(media_items) == 1:
@@ -428,14 +447,16 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
 
     await msg.edit_text("⬆️ Файл готов, отправляю…")
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
-            resp.raise_for_status()
-            video = resp.content
-    except httpx.HTTPError as e:
-        await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
-        return
+    video = _local_file_input(filename)
+    if video is None:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
+                resp.raise_for_status()
+                video = BufferedInputFile(resp.content, filename=filename)
+        except httpx.HTTPError as e:
+            await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
+            return
 
     caption = f"🎬 {title}" if title else "🎬 Видео"
     if dur:
