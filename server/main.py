@@ -30,6 +30,19 @@ class FormatsRequest(BaseModel):
     url: str
 
 
+class ProgressRequest(BaseModel):
+    url: str
+    height: int | None = None
+
+
+@app.post("/progress")
+def get_progress(req: ProgressRequest):
+    progress = downloader.get_progress(req.url, req.height)
+    if progress is None:
+        return {"ok": True, "active": False}
+    return {"ok": True, "active": True, **progress}
+
+
 @app.post("/formats")
 def formats(req: FormatsRequest):
     result = downloader.list_formats(req.url)

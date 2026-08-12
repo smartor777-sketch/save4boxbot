@@ -36,6 +36,24 @@ INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "4"))
 DOWNLOAD_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
 
+_PROGRESS: dict[tuple[str, int | None], dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+
+
+def _register_progress(key: tuple[str, int | None], **kw) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS[key] = kw
+
+
+def _unregister_progress(key: tuple[str, int | None]) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS.pop(key, None)
+
+
+def get_progress(url: str, height: int | None) -> dict | None:
+    with _PROGRESS_LOCK:
+        return _PROGRESS.get((url, height))
+
 SOCKET_TIMEOUT_SEC = int(os.getenv("YTDLP_SOCKET_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT_SEC = int(os.getenv("DOWNLOAD_TIMEOUT_SEC", "300"))
 
@@ -256,22 +274,31 @@ def _first_downloaded_path(info: dict) -> str | None:
     return None
 
 
-def _timeout_hook_builder():
+def _timeout_hook_builder(task_key: tuple[str, int | None] | None = None):
     start_time = time.time()
 
     def _hook(d: dict) -> None:
-        if d.get("status") != "downloading":
-            return
-        if time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:
-            raise DownloadTimeoutError(
-                f"Превышен лимит времени скачивания ({DOWNLOAD_TIMEOUT_SEC} сек)"
-            )
-        downloaded = d.get("downloaded_bytes") or 0
-        if downloaded > MAX_FILESIZE_BYTES:
-            raise FileTooBigError(
-                f"Видео слишком большое ({downloaded / 1024 / 1024:.0f} МБ), "
-                f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ — скачивание прервано"
-            )
+        if d.get("status") == "downloading":
+            if task_key is not None:
+                downloaded = d.get("downloaded_bytes") or 0
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                _register_progress(
+                    task_key,
+                    downloaded=downloaded,
+                    total=total,
+                    percent=round(downloaded / total * 100) if total else None,
+                    status="downloading",
+                )
+            if time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:
+                raise DownloadTimeoutError(
+                    f"Превышен лимит времени скачивания ({DOWNLOAD_TIMEOUT_SEC} сек)"
+                )
+            downloaded = d.get("downloaded_bytes") or 0
+            if downloaded > MAX_FILESIZE_BYTES:
+                raise FileTooBigError(
+                    f"Видео слишком большое ({downloaded / 1024 / 1024:.0f} МБ), "
+                    f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ — скачивание прервано"
+                )
 
     return _hook
 
@@ -435,7 +462,7 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
         }
 
     try:
-        result = _do_download(url, height, format_id)
+        result = _do_download(url, height, format_id, task_key=(url, height))
         if "error" not in result:
             stats.record_download(is_supported(url))
         return result
@@ -443,7 +470,9 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
         DOWNLOAD_SEM.release()
 
 
-def _do_download_instagram(url: str) -> dict:
+def _do_download_instagram(
+    url: str, task_key: tuple[str, int | None] | None = None
+) -> dict:
     import yt_dlp
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -469,7 +498,7 @@ def _do_download_instagram(url: str) -> dict:
             )
             opts["format"] = fmt_sel
             opts["playlist_items"] = str(idx)
-            opts["progress_hooks"] = [_timeout_hook_builder()]
+            opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = _extract_info_with_retry(ydl, url, download=True)
@@ -479,6 +508,9 @@ def _do_download_instagram(url: str) -> dict:
                 return {"error": str(e)}
             except Exception as e:
                 return {"error": f"Не удалось скачать: {e}"}
+            finally:
+                if task_key is not None:
+                    _unregister_progress(task_key)
 
             src = _first_downloaded_path(info)
             if not src or not os.path.exists(src):
@@ -559,13 +591,14 @@ def _estimate_size(v_tbr: float | None, a_tbr: float | None, duration: float | N
     return int(kbps / 8 * duration * 1024)
 
 
-def _do_download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
+def _do_download(url: str, height: int | None = None, format_id: str | None = None,
+                 task_key: tuple[str, int | None] | None = None) -> dict:
     import yt_dlp
 
     platform = is_supported(url)
 
     if platform == "instagram":
-        return _do_download_instagram(url)
+        return _do_download_instagram(url, task_key)
 
     fmt_sel, suffix = _fmt_selector(platform, height)
 
@@ -580,7 +613,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
         )
         opts["format"] = fmt_sel
         opts["merge_output_format"] = "mp4"
-        opts["progress_hooks"] = [_timeout_hook_builder()]
+        opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -591,6 +624,9 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
             return {"error": str(e)}
         except Exception as e:
             return {"error": f"Не удалось скачать: {e}"}
+        finally:
+            if task_key is not None:
+                _unregister_progress(task_key)
 
         src = None
         dl = (meta or {}).get("requested_downloads") or []

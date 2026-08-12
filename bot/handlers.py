@@ -1,4 +1,6 @@
 import os
+import asyncio
+import time
 
 import httpx
 import logging
@@ -45,6 +47,46 @@ async def _edit_status(msg: types.Message, text: str, kb: InlineKeyboardMarkup |
         await msg.edit_caption(text, reply_markup=kb)
     else:
         await msg.edit_text(text, reply_markup=kb)
+
+
+async def _poll_progress(
+    status_msg: types.Message,
+    label: str,
+    url: str,
+    height: int | None,
+    post_task: asyncio.Task,
+) -> None:
+    """Показывает процент скачивания, пока висит POST /download."""
+    last_pct = -1
+    last_edit = 0.0
+    while not post_task.done():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+                r = await client.post(
+                    f"{config.SERVER_URL}/progress",
+                    json={"url": url, "height": height},
+                )
+                body = r.json()
+            if not body.get("active"):
+                return
+            pct = body.get("percent")
+            if not isinstance(pct, (int, float)):
+                return
+            pct = min(99, max(0, int(pct)))
+        except (httpx.HTTPError, ValueError, TypeError):
+            await asyncio.sleep(2)
+            continue
+
+        now = time.monotonic()
+        if pct != last_pct and now - last_edit >= 3:
+            last_pct = pct
+            last_edit = now
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            try:
+                await _edit_status(status_msg, f"⏳ Скачиваю {label}… {pct}%\n{bar}")
+            except Exception:
+                pass
+        await asyncio.sleep(2)
 
 
 # key (video_id / hash) -> canonical url (в callback_data не влезает полный URL)
@@ -354,13 +396,26 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
         ]
     )
 
-    try:
+    async def _post() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{config.SERVER_URL}/download", json={"url": url})
-            body = resp.json()
-    except httpx.HTTPError as e:
-        await msg.edit_text(f"❌ Ошибка связи с сервером: {e}")
-        return
+            return await client.post(
+                f"{config.SERVER_URL}/download", json={"url": url}
+            )
+
+    post_task = asyncio.create_task(_post())
+    poll_task = asyncio.create_task(
+        _poll_progress(msg, "пост", url, None, post_task)
+    )
+    try:
+        try:
+            resp = await post_task
+        except httpx.HTTPError as e:
+            await msg.edit_text(f"❌ Ошибка связи с сервером: {e}")
+            return
+        body = resp.json()
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
 
     if resp.status_code == 503:
         await msg.edit_text("⚠️ Бот перегружен, пришлите Вашу ссылку позже.", reply_markup=retry_kb)
@@ -436,15 +491,26 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     if height != 0:
         payload["height"] = height
 
-    try:
+    async def _post() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
+            return await client.post(
                 f"{config.SERVER_URL}/download", json=payload
             )
-            body = resp.json()
-    except httpx.HTTPError as e:
-        await _edit_status(msg, f"❌ Ошибка связи с сервером: {e}")
-        return
+
+    post_task = asyncio.create_task(_post())
+    poll_task = asyncio.create_task(
+        _poll_progress(msg, height_label, url, None if height == 0 else height, post_task)
+    )
+    try:
+        try:
+            resp = await post_task
+        except httpx.HTTPError as e:
+            await _edit_status(msg, f"❌ Ошибка связи с сервером: {e}")
+            return
+        body = resp.json()
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
 
     if resp.status_code == 503:
         kb = InlineKeyboardMarkup(
