@@ -30,6 +30,19 @@ def _local_file_input(filename: str) -> FSInputFile | None:
     return None
 
 
+def _is_photo_message(msg: types.Message) -> bool:
+    """Сообщение с постером (фотография), которое потом подменим на видео."""
+    return bool(getattr(msg, "photo", None))
+
+
+async def _edit_status(msg: types.Message, text: str, kb: InlineKeyboardMarkup | None = None) -> None:
+    """Правит текст/подпись в зависимости от типа сообщения."""
+    if _is_photo_message(msg):
+        await msg.edit_caption(text, reply_markup=kb)
+    else:
+        await msg.edit_text(text, reply_markup=kb)
+
+
 # key (video_id / hash) -> canonical url (в callback_data не влезает полный URL)
 URLS: dict[str, str] = {}
 
@@ -242,12 +255,33 @@ async def handle_text(message: types.Message):
         return
 
     title = body.get("title", "Видео")
+    kb = _build_keyboard(available, key)
+
+    thumb_name = body.get("thumbnail")
+    if thumb_name:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                r = await client.get(f"{config.SERVER_URL}/file/{quote(thumb_name)}")
+                r.raise_for_status()
+        except httpx.HTTPError:
+            r = None
+        if r is not None and r.content and len(r.content) < 5 * 1024 * 1024:
+            poster = BufferedInputFile(r.content, filename=thumb_name)
+            try:
+                await status.answer_photo(poster, caption=f"🎬 {title}", reply_markup=kb)
+            except Exception:
+                pass  # постер не отправился — уходим в текстовый флоу
+            else:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                return
 
     if len(available) == 1 and available[0]["height"] == 0:
         await _download_and_send(status, key, 0)
         return
 
-    kb = _build_keyboard(available, key)
     await status.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
 
 
@@ -382,11 +416,13 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
 async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     url = URLS.get(key)
     if not url:
-        await msg.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
+        await _edit_status(msg, "❌ Ссылка устарела, пришли её ещё раз.")
         return
 
+    is_photo = _is_photo_message(msg)
+    empty_kb = InlineKeyboardMarkup(inline_keyboard=[])
     height_label = "видео" if height == 0 else f"{height}p"
-    await msg.edit_text(f"⏳ Скачиваю {height_label}…")
+    await _edit_status(msg, f"⏳ Скачиваю {height_label}…", empty_kb)
     timeout = httpx.Timeout(300.0, connect=10.0)
 
     payload = {"url": url}
@@ -400,7 +436,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
             )
             body = resp.json()
     except httpx.HTTPError as e:
-        await msg.edit_text(f"❌ Ошибка связи с сервером: {e}")
+        await _edit_status(msg, f"❌ Ошибка связи с сервером: {e}")
         return
 
     if resp.status_code == 503:
@@ -414,9 +450,10 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 ]
             ]
         )
-        await msg.edit_text(
+        await _edit_status(
+            msg,
             "⚠️ Бот перегружен, пришлите Вашу ссылку позже.",
-            reply_markup=kb,
+            kb,
         )
         return
 
@@ -433,19 +470,18 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                     ]
                 ]
             )
-            await msg.edit_text(
+            await _edit_status(
+                msg,
                 "❌ Видео не влезло в 50 МБ.\nПопробуй выбрать меньший формат:",
-                reply_markup=kb,
+                kb,
             )
         else:
-            await msg.edit_text(f"❌ {_friendly_error(error)}")
+            await _edit_status(msg, f"❌ {_friendly_error(error)}")
         return
 
     filename = body["filename"]
     title = body.get("title")
     dur = body.get("duration_min")
-
-    await msg.edit_text("⬆️ Файл готов, отправляю…")
 
     video = _local_file_input(filename)
     if video is None:
@@ -455,18 +491,23 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 resp.raise_for_status()
                 video = BufferedInputFile(resp.content, filename=filename)
         except httpx.HTTPError as e:
-            await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
+            await _edit_status(msg, f"❌ Ошибка загрузки файла: {e}")
             return
 
     caption = f"🎬 {title}" if title else "🎬 Видео"
     if dur:
         caption += f"\n⏱ Длительность: ~{dur} мин"
 
+    await _edit_status(msg, "⬆️ Файл готов, отправляю…", empty_kb)
+
     try:
-        await msg.answer_video(video, caption=caption)
-        await msg.delete()
+        if is_photo:
+            await msg.edit_media(InputMediaVideo(media=video, caption=caption))
+        else:
+            await msg.answer_video(video, caption=caption)
+            await msg.delete()
     except Exception as e:
-        await msg.edit_text(f"❌ Не удалось отправить: {e}")
+        await _edit_status(msg, f"❌ Не удалось отправить: {e}")
 
 
 @router.callback_query(F.data.startswith("rechoose:"))
@@ -502,7 +543,7 @@ async def rechoose(callback: types.CallbackQuery):
     if len(available) == 1 and available[0]["height"] == 0:
         await _download_and_send(msg, key, 0)
         return
-    await msg.edit_text(f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", reply_markup=kb)
+    await _edit_status(msg, f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", kb)
 
 
 @router.callback_query(F.data.startswith("cancel:"))

@@ -41,6 +41,7 @@ def formats(req: FormatsRequest):
         "title": result.get("title"),
         "duration_sec": result.get("duration_sec"),
         "formats": result.get("formats", []),
+        "thumbnail": result.get("thumbnail"),
     }
 
 

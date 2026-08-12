@@ -5,6 +5,8 @@ import tempfile
 import threading
 import time
 
+import httpx
+
 from dotenv import load_dotenv
 
 from . import stats
@@ -38,6 +40,59 @@ SOCKET_TIMEOUT_SEC = int(os.getenv("YTDLP_SOCKET_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT_SEC = int(os.getenv("DOWNLOAD_TIMEOUT_SEC", "300"))
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+THUMB_TIMEOUT_SEC = int(os.getenv("THUMB_TIMEOUT_SEC", "10"))
+THUMB_MAX_BYTES = int(os.getenv("THUMB_MAX_MB", "5")) * 1024 * 1024
+
+_CTYPE_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _save_thumbnail(info: dict) -> str | None:
+    """Скачивает превью видео и кладёт его в DOWNLOAD_DIR.
+
+    Возвращает имя файла (для /file/…) или None, если превью недоступно.
+    """
+    url = (info or {}).get("thumbnail")
+    if not url or not url.startswith(("http://", "https://")):
+        return None
+    vid = re.sub(r"[^A-Za-z0-9_\-]+", "", (info or {}).get("id") or "video") or "video"
+    filename = f"thumb_{vid}.jpg"
+    try:
+        with httpx.Client(timeout=THUMB_TIMEOUT_SEC, follow_redirects=True) as client:
+            with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    return None
+                chunks = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > THUMB_MAX_BYTES:
+                        return None
+                    chunks.append(chunk)
+                if not chunks:
+                    return None
+                ext = _CTYPE_EXT.get(content_type, ".jpg")
+                if ext != ".jpg":
+                    filename = f"thumb_{vid}{ext}"
+        path = os.path.join(DOWNLOAD_DIR, filename)
+        with open(path, "wb") as fh:
+            fh.write(b"".join(chunks))
+        return filename
+    except Exception:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except (OSError, NameError):
+            pass
+        return None
 
 
 class DownloadTimeoutError(Exception):
@@ -283,6 +338,7 @@ def list_formats(url: str) -> dict:
             "title": info.get("title"),
             "duration_sec": info.get("duration"),
             "formats": [{"height": 0, "format_id": "best", "filesize": None}],
+            "thumbnail": _save_thumbnail(info),
         }
 
     try:
@@ -362,6 +418,7 @@ def list_formats(url: str) -> dict:
         "title": info.get("title"),
         "duration_sec": info.get("duration"),
         "formats": formats,
+        "thumbnail": _save_thumbnail(info),
     }
 
 
