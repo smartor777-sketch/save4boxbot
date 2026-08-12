@@ -56,10 +56,13 @@ async def _poll_progress(
     height: int | None,
     post_task: asyncio.Task,
 ) -> None:
-    """Показывает процент скачивания, пока висит POST /download."""
-    last_pct = -1
+    """Показывает стадию и процент скачивания, пока висит POST /download."""
+    frames = ("🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛")
+    idx = 0
+    last_text = None
     last_edit = 0.0
     while not post_task.done():
+        text = None
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
                 r = await client.post(
@@ -67,27 +70,26 @@ async def _poll_progress(
                     json={"url": url, "height": height},
                 )
                 body = r.json()
-            if not body.get("active"):
-                await asyncio.sleep(2)
-                continue
+            st = body.get("status")
             pct = body.get("percent")
-            if not isinstance(pct, (int, float)):
-                await asyncio.sleep(2)
-                continue
-            pct = min(99, max(0, int(pct)))
+            if st == "downloading" and isinstance(pct, (int, float)):
+                pct = min(99, max(0, int(pct)))
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                text = f"⏳ Скачиваю {label}… {pct}%\n{bar}"
+            elif st == "extracting":
+                text = f"{frames[idx % len(frames)]} Получаю информацию… {label}"
         except (httpx.HTTPError, ValueError, TypeError):
-            await asyncio.sleep(2)
-            continue
+            text = None
 
         now = time.monotonic()
-        if pct != last_pct and now - last_edit >= 3:
-            last_pct = pct
+        if text and text != last_text and now - last_edit >= 3:
+            last_text = text
             last_edit = now
-            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
             try:
-                await _edit_status(status_msg, f"⏳ Скачиваю {label}… {pct}%\n{bar}")
+                await _edit_status(status_msg, text)
             except Exception:
                 pass
+        idx += 1
         await asyncio.sleep(2)
 
 

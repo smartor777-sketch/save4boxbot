@@ -475,77 +475,81 @@ def _do_download_instagram(
 ) -> dict:
     import yt_dlp
 
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
-                meta = _extract_info_with_retry(ydl, url, download=False)
-        except Exception as e:
-            return {"error": f"Не удалось получить информацию: {e}"}
+    if task_key is not None:
+        _register_progress(task_key, status="extracting")
 
-        entries = meta.get("entries") or []
-        items = [e for e in entries if e] if entries else [meta]
-        if not items:
-            return {"error": "Файл не был создан"}
-
-        tmp_dir = os.path.join(tmp, "dl")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        results = []
-        for idx, entry in enumerate(items, start=1):
-            fmt_sel = _instagram_entry_format(entry)
-            opts = _instagram_opts(
-                os.path.join(tmp_dir, f"%(title).100B [%(id)s]_{idx}.%(ext)s")
-            )
-            opts["format"] = fmt_sel
-            opts["playlist_items"] = str(idx)
-            opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
             try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = _extract_info_with_retry(ydl, url, download=True)
-            except DownloadTimeoutError as e:
-                return {"error": str(e)}
-            except FileTooBigError as e:
-                return {"error": str(e)}
+                with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
+                    meta = _extract_info_with_retry(ydl, url, download=False)
             except Exception as e:
-                return {"error": f"Не удалось скачать: {e}"}
-            finally:
-                if task_key is not None:
-                    _unregister_progress(task_key)
+                return {"error": f"Не удалось получить информацию: {e}"}
 
-            src = _first_downloaded_path(info)
-            if not src or not os.path.exists(src):
-                return {"error": f"Файл не был создан ({idx})"}
+            entries = meta.get("entries") or []
+            items = [e for e in entries if e] if entries else [meta]
+            if not items:
+                return {"error": "Файл не был создан"}
 
-            target = os.path.join(DOWNLOAD_DIR, os.path.basename(src))
-            shutil.move(src, target)
-            ext = os.path.splitext(target)[1].lower()
-            kind = "image" if ext in INSTAGRAM_IMAGE_EXTS else "video"
-            clean = _clean_instagram_name(os.path.basename(target), kind)
-            if clean != os.path.basename(target):
-                clean_target = os.path.join(DOWNLOAD_DIR, clean)
-                os.rename(target, clean_target)
-                target = clean_target
-            results.append({"filename": os.path.basename(target), "kind": kind})
+            tmp_dir = os.path.join(tmp, "dl")
+            os.makedirs(tmp_dir, exist_ok=True)
 
-        total = sum(
-            os.path.getsize(os.path.join(DOWNLOAD_DIR, r["filename"])) for r in results
-        )
-        if total > MAX_FILESIZE_BYTES:
-            return {
-                "error": (
-                    f"Пост слишком большой ({total / 1024 / 1024:.0f} МБ), "
-                    f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ"
+            results = []
+            for idx, entry in enumerate(items, start=1):
+                fmt_sel = _instagram_entry_format(entry)
+                opts = _instagram_opts(
+                    os.path.join(tmp_dir, f"%(title).100B [%(id)s]_{idx}.%(ext)s")
                 )
+                opts["format"] = fmt_sel
+                opts["playlist_items"] = str(idx)
+                opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = _extract_info_with_retry(ydl, url, download=True)
+                except DownloadTimeoutError as e:
+                    return {"error": str(e)}
+                except FileTooBigError as e:
+                    return {"error": str(e)}
+                except Exception as e:
+                    return {"error": f"Не удалось скачать: {e}"}
+
+                src = _first_downloaded_path(info)
+                if not src or not os.path.exists(src):
+                    return {"error": f"Файл не был создан ({idx})"}
+
+                target = os.path.join(DOWNLOAD_DIR, os.path.basename(src))
+                shutil.move(src, target)
+                ext = os.path.splitext(target)[1].lower()
+                kind = "image" if ext in INSTAGRAM_IMAGE_EXTS else "video"
+                clean = _clean_instagram_name(os.path.basename(target), kind)
+                if clean != os.path.basename(target):
+                    clean_target = os.path.join(DOWNLOAD_DIR, clean)
+                    os.rename(target, clean_target)
+                    target = clean_target
+                results.append({"filename": os.path.basename(target), "kind": kind})
+
+            total = sum(
+                os.path.getsize(os.path.join(DOWNLOAD_DIR, r["filename"])) for r in results
+            )
+            if total > MAX_FILESIZE_BYTES:
+                return {
+                    "error": (
+                        f"Пост слишком большой ({total / 1024 / 1024:.0f} МБ), "
+                        f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ"
+                    )
+                }
+
+            username = meta.get("channel") or meta.get("uploader")
+            title = _instagram_title(username, {r["kind"] for r in results})
+
+            return {
+                "ok": True,
+                "title": title,
+                "files": results,
             }
-
-        username = meta.get("channel") or meta.get("uploader")
-        title = _instagram_title(username, {r["kind"] for r in results})
-
-        return {
-            "ok": True,
-            "title": title,
-            "files": results,
-        }
+    finally:
+        if task_key is not None:
+            _unregister_progress(task_key)
 
 
 def _fmt_selector(platform: str, height: int | None) -> tuple[str, str]:
@@ -614,6 +618,8 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
         opts["format"] = fmt_sel
         opts["merge_output_format"] = "mp4"
         opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
+        if task_key is not None:
+            _register_progress(task_key, status="extracting")
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
