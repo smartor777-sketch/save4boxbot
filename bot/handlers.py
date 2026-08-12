@@ -98,8 +98,8 @@ async def _poll_progress(
             last_edit = now
             try:
                 await _edit_status(status_msg, text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("progress status edit failed: %s", e)
         idx += 1
         await asyncio.sleep(2)
 
@@ -515,11 +515,19 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
         await _edit_status(msg, "❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    is_photo = _is_photo_message(msg)
-    empty_kb = InlineKeyboardMarkup(inline_keyboard=[])
     height_label = "видео" if height == 0 else f"{height}p"
-    await _edit_status(msg, f"⏳ Скачиваю {height_label}…", empty_kb)
     timeout = httpx.Timeout(300.0, connect=10.0)
+
+    # Прогресс выводим в отдельное заметное текстовое сообщение: подпись под
+    # фото-постером слишком мелкая. Постер остаётся видимым во время скачивания.
+    if _is_photo_message(msg):
+        try:
+            progress_msg = await msg.answer(f"⏳ Скачиваю {height_label}…")
+        except Exception:
+            progress_msg = msg
+    else:
+        progress_msg = msg
+        await _edit_status(progress_msg, f"⏳ Скачиваю {height_label}…")
 
     payload = {"url": url}
     if height != 0:
@@ -533,13 +541,13 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
 
     post_task = asyncio.create_task(_post())
     poll_task = asyncio.create_task(
-        _poll_progress(msg, height_label, url, None if height == 0 else height, post_task)
+        _poll_progress(progress_msg, height_label, url, None if height == 0 else height, post_task)
     )
     try:
         try:
             resp = await post_task
         except httpx.HTTPError as e:
-            await _edit_status(msg, f"❌ Ошибка связи с сервером: {e}")
+            await _edit_status(progress_msg, f"❌ Ошибка связи с сервером: {e}")
             return
         body = resp.json()
     finally:
@@ -558,7 +566,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
             ]
         )
         await _edit_status(
-            msg,
+            progress_msg,
             "⚠️ Бот перегружен, пришлите Вашу ссылку позже.",
             kb,
         )
@@ -578,23 +586,29 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 ]
             )
             await _edit_status(
-                msg,
+                progress_msg,
                 "❌ Видео не влезло в 50 МБ.\nПопробуй выбрать меньший формат:",
                 kb,
             )
         else:
-            await _edit_status(msg, f"❌ {_friendly_error(error)}")
+            await _edit_status(progress_msg, f"❌ {_friendly_error(error)}")
         return
 
     filename = body["filename"]
     title = body.get("title")
     dur = body.get("duration_min")
 
-    caption = f"🎬 {title}" if title else "🎬 Видео"
+    height_label = f" ({height}p)" if height else ""
+    caption_parts = [f"🎬 {title}{height_label}"]
     if dur:
-        caption += f"\n⏱ Длительность: ~{dur} мин"
+        caption_parts.append(f"⏱️ Длительность: ~{dur} мин")
+    caption_parts.append(url)
+    caption = "\n".join(caption_parts)
 
-    await _edit_status(msg, "⬆️ Файл готов, отправляю…", empty_kb)
+    try:
+        await _edit_status(progress_msg, "⬆️ Файл готов, отправляю…")
+    except Exception:
+        pass
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -602,12 +616,23 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
             resp.raise_for_status()
             video = BufferedInputFile(resp.content, filename=filename)
         await msg.answer_video(video, caption=caption)
-        await msg.delete()
     except httpx.HTTPError as e:
-        await _edit_status(msg, f"❌ Ошибка загрузки файла: {e}")
+        await _edit_status(progress_msg, f"❌ Ошибка загрузки файла: {e}")
         return
     except Exception as e:
-        await _edit_status(msg, f"❌ Не удалось отправить: {e}")
+        await _edit_status(progress_msg, f"❌ Не удалось отправить: {e}")
+        return
+
+    # Видео отправлено — постер и статус больше не нужны.
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if progress_msg is not msg:
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("rechoose:"))
