@@ -1,6 +1,8 @@
 import os
 
 import httpx
+import logging
+
 from aiogram import F, Router, types
 from aiogram.types import (
     BufferedInputFile,
@@ -16,6 +18,8 @@ from . import config
 from .utils import extract_video
 
 router = Router()
+
+logger = logging.getLogger(__name__)
 
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")  # сюда сервер сохраняет файлы
 MAX_FILESIZE = 50 * 1024 * 1024  # лимит Telegram
@@ -224,6 +228,7 @@ async def handle_text(message: types.Message):
         )
         return
     platform, url, key = parsed
+    logger.info("Request: platform=%s key=%s url=%s", platform, key, url)
 
     status = await message.answer("⏳ Проверяю доступные форматы…")
     timeout = httpx.Timeout(120.0, connect=10.0)
@@ -263,20 +268,22 @@ async def handle_text(message: types.Message):
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 r = await client.get(f"{config.SERVER_URL}/file/{quote(thumb_name)}")
                 r.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            logger.warning("Thumb fetch failed thumb=%s: %s", thumb_name, e)
             r = None
         if r is not None and r.content and len(r.content) < 5 * 1024 * 1024:
             poster = BufferedInputFile(r.content, filename=thumb_name)
             try:
                 await status.answer_photo(poster, caption=f"🎬 {title}", reply_markup=kb)
-            except Exception:
-                pass  # постер не отправился — уходим в текстовый флоу
+            except Exception as e:
+                logger.warning("answer_photo failed for %s: %s", key, e)
             else:
                 try:
                     await status.delete()
                 except Exception:
                     pass
                 return
+    logger.info("No poster for key=%s (thumb=%s): fallback to text flow", key, thumb_name)
 
     if len(available) == 1 and available[0]["height"] == 0:
         await _download_and_send(status, key, 0)
