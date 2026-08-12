@@ -68,10 +68,12 @@ async def _poll_progress(
                 )
                 body = r.json()
             if not body.get("active"):
-                return
+                await asyncio.sleep(2)
+                continue
             pct = body.get("percent")
             if not isinstance(pct, (int, float)):
-                return
+                await asyncio.sleep(2)
+                continue
             pct = min(99, max(0, int(pct)))
         except (httpx.HTTPError, ValueError, TypeError):
             await asyncio.sleep(2)
