@@ -6,6 +6,7 @@ import httpx
 import logging
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     BufferedInputFile,
     FSInputFile,
@@ -42,11 +43,21 @@ def _is_photo_message(msg: types.Message) -> bool:
 
 
 async def _edit_status(msg: types.Message, text: str, kb: InlineKeyboardMarkup | None = None) -> None:
-    """Правит текст/подпись в зависимости от типа сообщения."""
-    if _is_photo_message(msg):
-        await msg.edit_caption(text, reply_markup=kb)
-    else:
-        await msg.edit_text(text, reply_markup=kb)
+    """Правит текст/подпись в зависимости от типа сообщения.
+
+    «message is not modified» и rate-limit не роняют обработчик — статус-сообщение
+    вторично, а падение тут теряет уже скачанный файл.
+    """
+    try:
+        if _is_photo_message(msg):
+            await msg.edit_caption(text, reply_markup=kb)
+        else:
+            await msg.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e):
+            raise
+    except TelegramRetryAfter as e:
+        logger.warning("status edit rate-limited, skip: %s", e)
 
 
 async def _poll_progress(
@@ -95,6 +106,9 @@ async def _poll_progress(
 
 # key (video_id / hash) -> canonical url (в callback_data не влезает полный URL)
 URLS: dict[str, str] = {}
+
+# скачивания в процессе («конкурентный двойной клик» по одной кнопке)
+_IN_FLIGHT: set[str] = set()
 
 
 def _size_label(size):
@@ -347,7 +361,15 @@ async def handle_format(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    await _download_and_send(callback.message, key, int(height))
+    marker = f"fmt:{key}:{height}"
+    if marker in _IN_FLIGHT:
+        await callback.answer("⏳ Уже скачиваю, чуть позже…", show_alert=False)
+        return
+    _IN_FLIGHT.add(marker)
+    try:
+        await _download_and_send(callback.message, key, int(height))
+    finally:
+        _IN_FLIGHT.discard(marker)
 
 
 async def _handle_instagram(msg: types.Message, key: str, body: dict) -> None:
@@ -378,7 +400,15 @@ async def handle_instagram_post(callback: types.CallbackQuery):
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
-    await _download_instagram_and_send(callback.message, key)
+    marker = f"ig:{key}"
+    if marker in _IN_FLIGHT:
+        await callback.answer("⏳ Уже скачиваю, чуть позже…", show_alert=False)
+        return
+    _IN_FLIGHT.add(marker)
+    try:
+        await _download_instagram_and_send(callback.message, key)
+    finally:
+        _IN_FLIGHT.discard(marker)
 
 
 async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
