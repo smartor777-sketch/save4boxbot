@@ -590,17 +590,6 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     title = body.get("title")
     dur = body.get("duration_min")
 
-    video = _local_file_input(filename)
-    if video is None:
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
-                resp.raise_for_status()
-                video = BufferedInputFile(resp.content, filename=filename)
-        except httpx.HTTPError as e:
-            await _edit_status(msg, f"❌ Ошибка загрузки файла: {e}")
-            return
-
     caption = f"🎬 {title}" if title else "🎬 Видео"
     if dur:
         caption += f"\n⏱ Длительность: ~{dur} мин"
@@ -608,11 +597,15 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     await _edit_status(msg, "⬆️ Файл готов, отправляю…", empty_kb)
 
     try:
-        if is_photo:
-            await msg.edit_media(InputMediaVideo(media=video, caption=caption))
-        else:
-            await msg.answer_video(video, caption=caption)
-            await msg.delete()
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
+            resp.raise_for_status()
+            video = BufferedInputFile(resp.content, filename=filename)
+        await msg.answer_video(video, caption=caption)
+        await msg.delete()
+    except httpx.HTTPError as e:
+        await _edit_status(msg, f"❌ Ошибка загрузки файла: {e}")
+        return
     except Exception as e:
         await _edit_status(msg, f"❌ Не удалось отправить: {e}")
 
