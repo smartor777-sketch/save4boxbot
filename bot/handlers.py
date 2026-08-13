@@ -205,22 +205,49 @@ def _format_label(fmt: dict, compact: bool = False) -> str:
     return label
 
 
+# Цвет inline-кнопок Telegram: None=стандартный, 1=оранжевый, 2=фиолетовый,
+# 3=синий, 4=зелёный. Кодек-кнопки красим по типу кодека, чтобы расшифровку
+# (ряд ниже «Отменить») можно было сопоставить с рядами форматов.
+_CODEC_COLORS = {
+    "h264": None,
+    "vp9": 4,
+    "hevc": 2,
+    "av1": 3,
+    "other": 1,
+}
+
+_CODEC_NAMES = {
+    "h264": "H.264",
+    "vp9": "VP9",
+    "hevc": "H.265",
+    "av1": "AV1",
+    "other": "Другой",
+}
+
+
 def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
     rows = []
     # Группируем по высоте: несколько кодеков одной высоты — в один ряд
     # (компактные метки «H.264 · 12 МБ»), единственный кодек — обычной кнопкой.
     by_height: dict[int, list[dict]] = {}
+    seen_codecs: dict[str, str] = {}
     for fmt in formats:
         if fmt.get("filesize") is None or fmt["filesize"] <= HARD_CAP:
             by_height.setdefault(fmt["height"], []).append(fmt)
+            ck = fmt.get("codec_key") or ""
+            if ck and fmt["height"] != 0:
+                seen_codecs.setdefault(ck, fmt.get("codec") or _CODEC_NAMES.get(ck, ck))
     for height in sorted(by_height):
         group = by_height[height]
         if len(group) == 1:
+            fmt = group[0]
+            ck = fmt.get("codec_key") or ""
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=_format_label(group[0]),
-                        callback_data=f"fmt:{key}:{height}:{group[0].get('codec_key', '')}",
+                        text=_format_label(fmt),
+                        callback_data=f"fmt:{key}:{height}:{ck}",
+                        color=_CODEC_COLORS.get(ck),
                     )
                 ]
             )
@@ -230,6 +257,7 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         text=_format_label(fmt, compact=True),
                         callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
+                        color=_CODEC_COLORS.get(fmt.get("codec_key") or ""),
                     )
                     for fmt in group
                 ]
@@ -243,6 +271,19 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
             )
         ]
     )
+    # Расшифровка цветов — ряд под «Отменить»: цвет кнопки = цвет кодека в
+    # рядах форматов выше.
+    if len(seen_codecs) > 1:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_CODEC_NAMES.get(ck, name),
+                    callback_data=f"legend:{ck}",
+                    color=_CODEC_COLORS.get(ck),
+                )
+                for ck, name in sorted(seen_codecs.items())
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -406,6 +447,12 @@ async def handle_format(callback: types.CallbackQuery):
         await _download_and_send(callback.message, key, height, codec)
     finally:
         _IN_FLIGHT.discard(marker)
+
+
+@router.callback_query(F.data.startswith("legend:"))
+async def handle_legend(callback: types.CallbackQuery):
+    # Кнопки расшифровки цветов ничего не делают — просто сбрасываем ожидание.
+    await callback.answer()
 
 
 async def _handle_instagram(msg: types.Message, key: str, body: dict) -> None:
