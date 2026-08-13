@@ -384,7 +384,7 @@ def list_formats(url: str) -> dict:
             "platform": "tiktok",
             "title": info.get("title"),
             "duration_sec": info.get("duration"),
-            "formats": [{"height": 0, "format_id": "best", "filesize": None}],
+            "formats": _group_formats(info, "tiktok"),
             "thumbnail": _save_thumbnail(info),
         }
 
@@ -394,8 +394,19 @@ def list_formats(url: str) -> dict:
     except Exception as e:
         return {"error": f"Не удалось получить информацию: {e}"}
 
-    # Группируем форматы по высоте и коду (h264/vp9/hevc/av1): одна высота
-    # может давать несколько кодеков с разным размером.
+    return {
+        "ok": True,
+        "platform": platform,
+        "title": info.get("title"),
+        "duration_sec": info.get("duration"),
+        "formats": _group_formats(info, platform),
+        "thumbnail": _save_thumbnail(info),
+    }
+
+
+def _group_formats(info: dict, platform: str) -> list[dict]:
+    """Группирует форматы по высоте и коду (h264/vp9/hevc/av1): одна высота
+    может давать несколько кодеков с разным размером."""
     by_height: dict[int, dict[str, dict]] = {}
     audio_sizes = []
     for f in info.get("formats", []):
@@ -466,14 +477,7 @@ def list_formats(url: str) -> dict:
                 }
             )
 
-    return {
-        "ok": True,
-        "platform": platform,
-        "title": info.get("title"),
-        "duration_sec": info.get("duration"),
-        "formats": formats,
-        "thumbnail": _save_thumbnail(info),
-    }
+    return formats
 
 
 def download(
@@ -600,9 +604,6 @@ def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -
     no_hls = "[protocol!*=m3u8]" if platform in ("vk", "yandex") else ""
     audio_cap = "[tbr<=136]" if platform in ("vk", "yandex") else ""
 
-    if platform == "tiktok":
-        return "best", ""
-
     vcodec_filter = {
         "h264": "[vcodec^=avc1]",
         "av1": "[vcodec^=av01]",
@@ -612,6 +613,17 @@ def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -
         "hevc": "[vcodec~=^(hvc1|hev1)]",
         "other": "",
     }.get(codec or "", "")
+
+    # TikTok отдаёт комбинированные mp4 (видео+аудио в одном файле), отдельных
+    # аудио-потоков нет — селектор по best с учётом высоты и кодека.
+    if platform == "tiktok":
+        vf = vcodec_filter or "[vcodec^=avc1]"
+        if not height:
+            return f"best{vf}/best", "_720p"
+        return (
+            f"best[height<={height}]{vf}/best[height<={height}]/best",
+            f"_{height}p",
+        )
 
     # Telegram стримит только H.264/AAC в MP4 (supports_streaming), поэтому
     # сначала пробуем предпочтительный кодек + mp4a, при недоступности — любой.
