@@ -500,7 +500,7 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
         if len(media_items) == 1:
             kind, bf = media_items[0]
             if kind == "video":
-                await msg.answer_video(bf, caption=caption)
+                await msg.answer_video(bf, caption=caption, supports_streaming=True)
             else:
                 await msg.answer_photo(bf, caption=caption)
         else:
@@ -627,7 +627,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
         except Exception:
             pass
         try:
-            await msg.answer_video(local, caption=caption)
+            await msg.answer_video(local, caption=caption, supports_streaming=True)
         except Exception as e:
             await _edit_status(progress_msg, f"❌ Не удалось отправить: {e}")
             return
@@ -672,7 +672,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                             except Exception:
                                 pass
             video = BufferedInputFile(b"".join(chunks), filename=filename)
-            await msg.answer_video(video, caption=caption)
+            await msg.answer_video(video, caption=caption, supports_streaming=True)
         except httpx.HTTPError as e:
             await _edit_status(progress_msg, f"❌ Ошибка загрузки файла: {e}")
             return

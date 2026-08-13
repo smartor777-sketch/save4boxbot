@@ -305,13 +305,18 @@ def _timeout_hook_builder(task_key: tuple[str, int | None] | None = None):
 
 
 def _codec_rank(vcodec: str | None) -> int:
-    """Приоритет кодеков, совпадающий с yt-dlp при выборе bestvideo."""
+    """Приоритет кодеков.
+
+    H.264/avc1 — на первом месте: только его Telegram стримит нативно
+    (supports_streaming), остальные кодеки требуют полной загрузки файла.
+    AV1/VP9 по размеру меньше, поэтому идут как фолбэк.
+    """
     v = (vcodec or "").lower()
-    if v.startswith("av01") or v.startswith("av1"):
+    if v.startswith("h264") or v.startswith("avc"):
         return 3
     if v.startswith("vp9") or v.startswith("hevc") or v.startswith("h265"):
         return 2
-    if v.startswith("h264") or v.startswith("avc"):
+    if v.startswith("av01") or v.startswith("av1"):
         return 1
     return 0
 
@@ -564,11 +569,20 @@ def _fmt_selector(platform: str, height: int | None) -> tuple[str, str]:
 
     if platform == "tiktok":
         return "best", ""
+
+    # Telegram стримит только H.264/AAC в MP4 (supports_streaming), поэтому
+    # сначала пробуем avc1+mp4a, при недоступности — любой кодек.
     if not height:
-        return f"best{no_hls}/best", "_720p"
+        return (
+            f"best{no_hls}[vcodec^=avc1][acodec^=mp4a]/best{no_hls}/best",
+            "_720p",
+        )
+    h264_audio = f"bestvideo[height<={height}]{no_hls}[vcodec^=avc1]+bestaudio{no_hls}[acodec^=mp4a]"
+    h264_no_audio = f"bestvideo[height<={height}]{no_hls}[vcodec^=avc1]+bestaudio{no_hls}{audio_cap}"
+    any_codec = f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}{audio_cap}"
+    fallback = f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}"
     return (
-        f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}{audio_cap}"
-        f"/bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}"
+        f"{h264_audio}/{h264_no_audio}/{any_codec}/{fallback}"
         f"/best[height<={height}]{no_hls}/best",
         f"_{height}p",
     )
