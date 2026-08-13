@@ -403,8 +403,9 @@ async def handle_text(message: types.Message):
                 return
     logger.info("No poster for key=%s (thumb=%s): fallback to text flow", key, thumb_name)
 
-    if len(available) == 1 and available[0]["height"] == 0:
-        await _download_and_send(status, key, 0)
+    if len(available) == 1:
+        f = available[0]
+        await _download_and_send(status, key, f["height"], f.get("codec_key"))
         return
 
     await status.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
@@ -789,8 +790,9 @@ async def rechoose(callback: types.CallbackQuery):
         return
 
     kb = _build_keyboard(available, key)
-    if len(available) == 1 and available[0]["height"] == 0:
-        await _download_and_send(msg, key, 0)
+    if len(available) == 1:
+        f = available[0]
+        await _download_and_send(msg, key, f["height"], f.get("codec_key"))
         return
     await _edit_status(msg, f"🎬 {body.get('title', 'Видео')}\n\nВыбери качество:", kb)
 
