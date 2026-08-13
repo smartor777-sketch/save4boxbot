@@ -185,14 +185,15 @@ def _friendly_error(error) -> str:
     return str(error)
 
 
-def _format_label(fmt: dict) -> str:
+def _format_label(fmt: dict, show_codec: bool = False) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
     if height == 0:
         return "⬇️ Скачать видео"
+    codec_txt = f" · {fmt.get('codec')}" if show_codec and fmt.get("codec") else ""
     if size is None:
-        return f"{height}p · ~размер"
-    label = f"{height}p · {_size_label(size)}"
+        return f"{height}p{codec_txt} · ~размер"
+    label = f"{height}p{codec_txt} · {_size_label(size)}"
     if size > SLOW_SIZE:
         label += " (долго)"
     return label
@@ -233,10 +234,13 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
                 seen_codecs.setdefault(ck, fmt.get("codec") or _CODEC_NAMES.get(ck, ck))
     for height in sorted(by_height):
         group = by_height[height]
+        # Один формат на высоту — кодек показываем текстом (легенды цветов
+        # не будет). Несколько кодеков — кодек передан цветом кнопки.
+        show_codec = len(group) == 1
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_format_label(fmt),
+                    text=_format_label(fmt, show_codec=show_codec),
                     callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
                     style=_CODEC_COLORS.get(fmt.get("codec_key") or ""),
                 )
