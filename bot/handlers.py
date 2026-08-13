@@ -615,15 +615,45 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     caption = "\n".join(caption_parts)
 
     try:
-        await _edit_status(progress_msg, "⬆️ Файл готов, отправляю…")
+        await _edit_status(
+            progress_msg,
+            "✅ Скачано на сервере: 100%\n"
+            "██████████\n\n"
+            "📤 Передаю файл… 0%\n"
+            "░░░░░░░░░░",
+        )
     except Exception:
         pass
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{config.SERVER_URL}/file/{quote(filename)}")
-            resp.raise_for_status()
-            video = BufferedInputFile(resp.content, filename=filename)
+            async with client.stream(
+                "GET", f"{config.SERVER_URL}/file/{quote(filename)}"
+            ) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0)
+                chunks = []
+                received = 0
+                last_edit = 0.0
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    received += len(chunk)
+                    now = time.monotonic()
+                    if total and now - last_edit >= 2:
+                        last_edit = now
+                        fet = min(99, max(0, int(received / total * 100)))
+                        fbar = "█" * (fet // 10) + "░" * (10 - fet // 10)
+                        try:
+                            await _edit_status(
+                                progress_msg,
+                                "✅ Скачано на сервере: 100%\n"
+                                "██████████\n\n"
+                                f"📤 Передаю файл… {fet}%\n"
+                                f"{fbar}",
+                            )
+                        except Exception:
+                            pass
+        video = BufferedInputFile(b"".join(chunks), filename=filename)
         await msg.answer_video(video, caption=caption)
     except httpx.HTTPError as e:
         await _edit_status(progress_msg, f"❌ Ошибка загрузки файла: {e}")
