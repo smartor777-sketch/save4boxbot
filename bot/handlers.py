@@ -88,7 +88,16 @@ async def _poll_progress(
                 bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
                 text = f"⏳ Скачиваю {label}… {pct}%\n{bar}"
             elif st == "extracting":
-                text = f"{frames[idx % len(frames)]} Получаю информацию… {label}"
+                # Точного % на этапе извлечения нет — сервер отдаёт прошедшие
+                # секунды, рисуем плавную полоску с капом 88%, чтобы не выглядела
+                # завершённой до старта скачивания.
+                elapsed = int(body.get("elapsed") or 0)
+                ep = min(88, elapsed * 88 // 15)
+                bar = "█" * (ep // 10) + "░" * (10 - ep // 10)
+                text = (
+                    f"{frames[idx % len(frames)]} Получаю информацию… {label} "
+                    f"({elapsed}с)\n{bar}"
+                )
         except (httpx.HTTPError, ValueError, TypeError):
             text = None
 

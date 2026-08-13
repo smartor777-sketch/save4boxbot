@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -40,6 +41,8 @@ def get_progress(req: ProgressRequest):
     progress = downloader.get_progress(req.url, req.height)
     if progress is None:
         return {"ok": True, "active": False}
+    if progress.get("status") == "extracting" and progress.get("started_at"):
+        progress["elapsed"] = round(time.time() - progress["started_at"])
     return {"ok": True, "active": True, **progress}
 
 

@@ -288,6 +288,7 @@ def _timeout_hook_builder(task_key: tuple[str, int | None] | None = None):
                     total=total,
                     percent=round(downloaded / total * 100) if total else None,
                     status="downloading",
+                    started_at=start_time,
                 )
             if time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:
                 raise DownloadTimeoutError(
@@ -476,7 +477,7 @@ def _do_download_instagram(
     import yt_dlp
 
     if task_key is not None:
-        _register_progress(task_key, status="extracting")
+        _register_progress(task_key, status="extracting", started_at=time.time())
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -619,7 +620,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
         opts["merge_output_format"] = "mp4"
         opts["progress_hooks"] = [_timeout_hook_builder(task_key)]
         if task_key is not None:
-            _register_progress(task_key, status="extracting")
+            _register_progress(task_key, status="extracting", started_at=time.time())
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
