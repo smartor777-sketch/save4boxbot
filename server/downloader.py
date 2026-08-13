@@ -282,12 +282,25 @@ def _timeout_hook_builder(task_key: tuple[str, int | None, str | None] | None = 
             if task_key is not None:
                 downloaded = d.get("downloaded_bytes") or 0
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                # Определяем, какой поток качается: видео / аудио / оба сразу
+                # (прогрессивный формат). DASH на YouTube качает видео и аудио
+                # отдельно — бот показывает каждый поток своим баром.
+                info = d.get("info_dict") or {}
+                vcodec = info.get("vcodec") or "none"
+                acodec = info.get("acodec") or "none"
+                if vcodec != "none" and acodec != "none":
+                    stream = "combined"
+                elif vcodec != "none":
+                    stream = "video"
+                else:
+                    stream = "audio"
                 _register_progress(
                     task_key,
                     downloaded=downloaded,
                     total=total,
                     percent=round(downloaded / total * 100) if total else None,
                     status="downloading",
+                    stream=stream,
                     started_at=start_time,
                 )
             if time.time() - start_time > DOWNLOAD_TIMEOUT_SEC:

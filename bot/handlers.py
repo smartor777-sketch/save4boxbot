@@ -87,7 +87,15 @@ async def _poll_progress(
             if st == "downloading" and isinstance(pct, (int, float)):
                 pct = min(99, max(0, int(pct)))
                 bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-                text = f"⏳ Скачиваю {label}… {pct}%\n{bar}"
+                # Сервер отдаёт stream: video/audio/combined — показываем,
+                # какой поток качается (DASH качает их отдельно).
+                stream = body.get("stream")
+                if stream == "video":
+                    text = f"📹 Видео {pct}%\n{bar}"
+                elif stream == "audio":
+                    text = f"🎵 Аудио {pct}%\n{bar}"
+                else:
+                    text = f"⏳ Скачиваю {label}… {pct}%\n{bar}"
             elif st == "extracting":
                 # Точного % на этапе извлечения нет — сервер отдаёт прошедшие
                 # секунды, рисуем плавную полоску с капом 88%, чтобы не выглядела
