@@ -220,10 +220,14 @@ _CODEC_NAMES = {
 }
 
 
-def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
+def _build_keyboard(
+    formats: list[dict], key: str, platform: str | None = None
+) -> InlineKeyboardMarkup:
     rows = []
     # Группируем по высоте: несколько кодеков одной высоты — в один ряд
     # (надписи «1080p · 20 МБ», кодек передан цветом кнопки).
+    # Для TikTok кодек всегда пишем текстом: там обычно один кодек (H.264),
+    # и цветовая легенда бессмысленна — все кнопки одного цвета.
     by_height: dict[int, list[dict]] = {}
     seen_codecs: dict[str, str] = {}
     for fmt in formats:
@@ -236,13 +240,15 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
         group = by_height[height]
         # Один формат на высоту — кодек показываем текстом (легенды цветов
         # не будет). Несколько кодеков — кодек передан цветом кнопки.
-        show_codec = len(group) == 1
+        show_codec = len(group) == 1 or platform == "tiktok"
         rows.append(
             [
                 InlineKeyboardButton(
                     text=_format_label(fmt, show_codec=show_codec),
                     callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
-                    style=_CODEC_COLORS.get(fmt.get("codec_key") or ""),
+                    style=_CODEC_COLORS.get(fmt.get("codec_key") or "")
+                    if platform != "tiktok"
+                    else None,
                 )
                 for fmt in group
             ]
@@ -257,8 +263,8 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
         ]
     )
     # Расшифровка цветов — ряд под «Отменить»: цвет кнопки = цвет кодека в
-    # рядах форматов выше.
-    if len(seen_codecs) > 1:
+    # рядах форматов выше. Для TikTok легенда не нужна (кодек в тексте).
+    if len(seen_codecs) > 1 and platform != "tiktok":
         rows.append(
             [
                 InlineKeyboardButton(
@@ -378,7 +384,7 @@ async def handle_text(message: types.Message):
         return
 
     title = body.get("title", "Видео")
-    kb = _build_keyboard(available, key)
+    kb = _build_keyboard(available, key, platform)
 
     thumb_name = body.get("thumbnail")
     if thumb_name:
@@ -789,7 +795,7 @@ async def rechoose(callback: types.CallbackQuery):
         )
         return
 
-    kb = _build_keyboard(available, key)
+    kb = _build_keyboard(available, key, body.get("platform"))
     if len(available) == 1:
         f = available[0]
         await _download_and_send(msg, key, f["height"], f.get("codec_key"))
