@@ -36,23 +36,23 @@ INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "4"))
 DOWNLOAD_SEM = threading.BoundedSemaphore(MAX_CONCURRENT_DOWNLOADS)
 
-_PROGRESS: dict[tuple[str, int | None], dict] = {}
+_PROGRESS: dict[tuple[str, int | None, str | None], dict] = {}
 _PROGRESS_LOCK = threading.Lock()
 
 
-def _register_progress(key: tuple[str, int | None], **kw) -> None:
+def _register_progress(key: tuple[str, int | None, str | None], **kw) -> None:
     with _PROGRESS_LOCK:
         _PROGRESS[key] = kw
 
 
-def _unregister_progress(key: tuple[str, int | None]) -> None:
+def _unregister_progress(key: tuple[str, int | None, str | None]) -> None:
     with _PROGRESS_LOCK:
         _PROGRESS.pop(key, None)
 
 
-def get_progress(url: str, height: int | None) -> dict | None:
+def get_progress(url: str, height: int | None, codec: str | None = None) -> dict | None:
     with _PROGRESS_LOCK:
-        return _PROGRESS.get((url, height))
+        return _PROGRESS.get((url, height, codec))
 
 SOCKET_TIMEOUT_SEC = int(os.getenv("YTDLP_SOCKET_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT_SEC = int(os.getenv("DOWNLOAD_TIMEOUT_SEC", "300"))
@@ -274,7 +274,7 @@ def _first_downloaded_path(info: dict) -> str | None:
     return None
 
 
-def _timeout_hook_builder(task_key: tuple[str, int | None] | None = None):
+def _timeout_hook_builder(task_key: tuple[str, int | None, str | None] | None = None):
     start_time = time.time()
 
     def _hook(d: dict) -> None:
@@ -304,6 +304,20 @@ def _timeout_hook_builder(task_key: tuple[str, int | None] | None = None):
     return _hook
 
 
+def _codec_key(vcodec: str | None) -> str:
+    """Группа кодека для выбора формата: h264 / vp9 / hevc / av1 / other."""
+    v = (vcodec or "").lower()
+    if v.startswith("av01") or v.startswith("av1"):
+        return "av1"
+    if v.startswith("vp09") or v.startswith("vp9"):
+        return "vp9"
+    if v.startswith("h264") or v.startswith("avc"):
+        return "h264"
+    if v.startswith("hvc1") or v.startswith("hev1") or v.startswith("hevc") or v.startswith("h265"):
+        return "hevc"
+    return "other"
+
+
 def _codec_rank(vcodec: str | None) -> int:
     """Приоритет кодеков.
 
@@ -314,7 +328,7 @@ def _codec_rank(vcodec: str | None) -> int:
     v = (vcodec or "").lower()
     if v.startswith("h264") or v.startswith("avc"):
         return 3
-    if v.startswith("vp9") or v.startswith("hevc") or v.startswith("h265"):
+    if v.startswith("vp09") or v.startswith("vp9") or v.startswith("hevc") or v.startswith("h265") or v.startswith("hvc1") or v.startswith("hev1"):
         return 2
     if v.startswith("av01") or v.startswith("av1"):
         return 1
@@ -380,7 +394,9 @@ def list_formats(url: str) -> dict:
     except Exception as e:
         return {"error": f"Не удалось получить информацию: {e}"}
 
-    by_height = {}
+    # Группируем форматы по высоте и коду (h264/vp9/hevc/av1): одна высота
+    # может давать несколько кодеков с разным размером.
+    by_height: dict[int, dict[str, dict]] = {}
     audio_sizes = []
     for f in info.get("formats", []):
         height = f.get("height")
@@ -388,13 +404,14 @@ def list_formats(url: str) -> dict:
         acodec = f.get("acodec")
 
         if height and vcodec != "none":
+            ck = _codec_key(vcodec)
             size = f.get("filesize") or f.get("filesize_approx")
             tbr = f.get("tbr") or 0
             progressive = bool(acodec and acodec != "none")
             rank = _codec_rank(vcodec)
-            cur = by_height.get(height)
+            cur = by_height.setdefault(height, {}).get(ck)
             if cur is None or (rank, tbr) > (cur.get("rank", 0), cur.get("tbr", 0)):
-                by_height[height] = {
+                by_height[height][ck] = {
                     "height": height,
                     "format_id": f["format_id"],
                     "size": size,
@@ -424,26 +441,30 @@ def list_formats(url: str) -> dict:
         "avc": "H.264",
     }
 
+    codec_order = {"h264": 0, "vp9": 1, "hevc": 2, "av1": 3, "other": 4}
+
     formats = []
     for h in sorted(by_height):
-        fmt = by_height[h]
-        vid_size = fmt["size"]
-        if fmt["progressive"]:
-            total = vid_size or _estimate_size(fmt["tbr"], None, duration)
-        elif vid_size is not None:
-            total = vid_size + (best_audio_size or 0)
-        else:
-            total = _estimate_size(fmt["tbr"], audio_tbr, duration)
-        vc = fmt["vcodec"] or ""
-        codec = codec_names.get(vc.split(".")[0], vc.upper())
-        formats.append(
-            {
-                "height": h,
-                "format_id": fmt["format_id"],
-                "filesize": total,
-                "codec": codec,
-            }
-        )
+        for ck in sorted(by_height[h], key=lambda c: codec_order.get(c, 9)):
+            fmt = by_height[h][ck]
+            vid_size = fmt["size"]
+            if fmt["progressive"]:
+                total = vid_size or _estimate_size(fmt["tbr"], None, duration)
+            elif vid_size is not None:
+                total = vid_size + (best_audio_size or 0)
+            else:
+                total = _estimate_size(fmt["tbr"], audio_tbr, duration)
+            vc = fmt["vcodec"] or ""
+            codec = codec_names.get(vc.split(".")[0], vc.upper())
+            formats.append(
+                {
+                    "height": h,
+                    "format_id": fmt["format_id"],
+                    "filesize": total,
+                    "codec": codec,
+                    "codec_key": ck,
+                }
+            )
 
     return {
         "ok": True,
@@ -455,7 +476,12 @@ def list_formats(url: str) -> dict:
     }
 
 
-def download(url: str, height: int | None = None, format_id: str | None = None) -> dict:
+def download(
+    url: str,
+    height: int | None = None,
+    format_id: str | None = None,
+    codec: str | None = None,
+) -> dict:
     import yt_dlp
 
     if not is_supported(url):
@@ -468,7 +494,9 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
         }
 
     try:
-        result = _do_download(url, height, format_id, task_key=(url, height))
+        result = _do_download(
+            url, height, format_id, codec, task_key=(url, height, codec)
+        )
         if "error" not in result:
             stats.record_download(is_supported(url))
         return result
@@ -477,7 +505,7 @@ def download(url: str, height: int | None = None, format_id: str | None = None) 
 
 
 def _do_download_instagram(
-    url: str, task_key: tuple[str, int | None] | None = None
+    url: str, task_key: tuple[str, int | None, str | None] | None = None
 ) -> dict:
     import yt_dlp
 
@@ -558,8 +586,13 @@ def _do_download_instagram(
             _unregister_progress(task_key)
 
 
-def _fmt_selector(platform: str, height: int | None) -> tuple[str, str]:
-    """Селектор формата и суффикс имени файла."""
+def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -> tuple[str, str]:
+    """Селектор формата и суффикс имени файла.
+
+    codec — предпочтительный кодек (h264/vp9/hevc/av1). Если передан,
+    сначала пробуем этот кодек с mp4a, затем этот кодек с любым аудио,
+    затем любой кодек — как фолбэк.
+    """
     # HLS (m3u8) у VK/Яндекса с серверных IP виснет на скачивании фрагментов,
     # поэтому исключаем его и берём single-file DASH-форматы. Аудио капаем
     # ~134 кбит/с (ближайшая ступенька VK), чтобы длинные ролики не раздувались
@@ -570,17 +603,42 @@ def _fmt_selector(platform: str, height: int | None) -> tuple[str, str]:
     if platform == "tiktok":
         return "best", ""
 
+    vcodec_filter = {
+        "h264": "[vcodec^=avc1]",
+        "av1": "[vcodec^=av01]",
+        "vp9": "[vcodec^=vp09]",
+        # hvc1/hev1 — оба префикса HEVC, ^= в одном условии даёт AND,
+        # поэтому regex через ~=.
+        "hevc": "[vcodec~=^(hvc1|hev1)]",
+        "other": "",
+    }.get(codec or "", "")
+
     # Telegram стримит только H.264/AAC в MP4 (supports_streaming), поэтому
-    # сначала пробуем avc1+mp4a, при недоступности — любой кодек.
+    # сначала пробуем предпочтительный кодек + mp4a, при недоступности — любой.
     if not height:
+        if vcodec_filter:
+            return (
+                f"best{no_hls}{vcodec_filter}[acodec^=mp4a]"
+                f"/best{no_hls}{vcodec_filter}/best{no_hls}/best",
+                "_720p",
+            )
         return (
             f"best{no_hls}[vcodec^=avc1][acodec^=mp4a]/best{no_hls}/best",
             "_720p",
         )
+    codec_audio = f"bestvideo[height<={height}]{no_hls}{vcodec_filter}+bestaudio{no_hls}[acodec^=mp4a]"
+    codec_no_audio = f"bestvideo[height<={height}]{no_hls}{vcodec_filter}+bestaudio{no_hls}{audio_cap}"
     h264_audio = f"bestvideo[height<={height}]{no_hls}[vcodec^=avc1]+bestaudio{no_hls}[acodec^=mp4a]"
     h264_no_audio = f"bestvideo[height<={height}]{no_hls}[vcodec^=avc1]+bestaudio{no_hls}{audio_cap}"
     any_codec = f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}{audio_cap}"
     fallback = f"bestvideo[height<={height}]{no_hls}+bestaudio{no_hls}"
+    if vcodec_filter:
+        return (
+            f"{codec_audio}/{codec_no_audio}/{h264_audio}/{h264_no_audio}"
+            f"/{any_codec}/{fallback}"
+            f"/best[height<={height}]{no_hls}/best",
+            f"_{height}p",
+        )
     return (
         f"{h264_audio}/{h264_no_audio}/{any_codec}/{fallback}"
         f"/best[height<={height}]{no_hls}/best",
@@ -611,7 +669,8 @@ def _estimate_size(v_tbr: float | None, a_tbr: float | None, duration: float | N
 
 
 def _do_download(url: str, height: int | None = None, format_id: str | None = None,
-                 task_key: tuple[str, int | None] | None = None) -> dict:
+                 codec: str | None = None,
+                 task_key: tuple[str, int | None, str | None] | None = None) -> dict:
     import yt_dlp
 
     platform = is_supported(url)
@@ -619,7 +678,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
     if platform == "instagram":
         return _do_download_instagram(url, task_key)
 
-    fmt_sel, suffix = _fmt_selector(platform, height)
+    fmt_sel, suffix = _fmt_selector(platform, height, codec)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = os.path.join(tmp, "dl")

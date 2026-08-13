@@ -66,6 +66,7 @@ async def _poll_progress(
     url: str,
     height: int | None,
     post_task: asyncio.Task,
+    codec: str | None = None,
 ) -> None:
     """Показывает стадию и процент скачивания, пока висит POST /download."""
     frames = ("🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛")
@@ -78,7 +79,7 @@ async def _poll_progress(
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
                 r = await client.post(
                     f"{config.SERVER_URL}/progress",
-                    json={"url": url, "height": height},
+                    json={"url": url, "height": height, "codec": codec},
                 )
                 body = r.json()
             st = body.get("status")
@@ -184,13 +185,18 @@ def _friendly_error(error) -> str:
     return str(error)
 
 
-def _format_label(fmt: dict) -> str:
+def _format_label(fmt: dict, compact: bool = False) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
     codec = fmt.get("codec")
-    codec_txt = f" · {codec}" if codec else ""
     if height == 0:
         return "⬇️ Скачать видео"
+    if compact:
+        codec_txt = f"{codec} · " if codec else ""
+        if size is None:
+            return f"{codec_txt}~размер"
+        return f"{codec_txt}{_size_label(size)}"
+    codec_txt = f" · {codec}" if codec else ""
     if size is None:
         return f"{height}p{codec_txt} · ~размер"
     label = f"{height}p{codec_txt} · {_size_label(size)}"
@@ -201,14 +207,31 @@ def _format_label(fmt: dict) -> str:
 
 def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
     rows = []
+    # Группируем по высоте: несколько кодеков одной высоты — в один ряд
+    # (компактные метки «H.264 · 12 МБ»), единственный кодек — обычной кнопкой.
+    by_height: dict[int, list[dict]] = {}
     for fmt in formats:
         if fmt.get("filesize") is None or fmt["filesize"] <= HARD_CAP:
+            by_height.setdefault(fmt["height"], []).append(fmt)
+    for height in sorted(by_height):
+        group = by_height[height]
+        if len(group) == 1:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=_format_label(fmt),
-                        callback_data=f"fmt:{key}:{fmt['height']}",
+                        text=_format_label(group[0]),
+                        callback_data=f"fmt:{key}:{height}:{group[0].get('codec_key', '')}",
                     )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=_format_label(fmt, compact=True),
+                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
+                    )
+                    for fmt in group
                 ]
             )
     rows.append(
@@ -364,19 +387,23 @@ async def handle_text(message: types.Message):
 @router.callback_query(F.data.startswith("fmt:"))
 async def handle_format(callback: types.CallbackQuery):
     await callback.answer()
-    _, key, height = callback.data.split(":")
+    parts = callback.data.split(":")
+    key = parts[1]
+    height = int(parts[2])
+    # Новый формат fmt:{key}:{height}:{codec}; старые кнопки без кодека тоже работают.
+    codec = parts[3] if len(parts) > 3 and parts[3] else None
     url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    marker = f"fmt:{key}:{height}"
+    marker = f"fmt:{key}:{height}:{codec or ''}"
     if marker in _IN_FLIGHT:
         await callback.answer("⏳ Уже скачиваю, чуть позже…", show_alert=False)
         return
     _IN_FLIGHT.add(marker)
     try:
-        await _download_and_send(callback.message, key, int(height))
+        await _download_and_send(callback.message, key, height, codec)
     finally:
         _IN_FLIGHT.discard(marker)
 
@@ -518,29 +545,34 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
         await msg.edit_text(f"❌ Не удалось отправить: {e}")
 
 
-async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
+async def _download_and_send(
+    msg: types.Message, key: str, height: int, codec: str | None = None
+) -> None:
     url = URLS.get(key)
     if not url:
         await _edit_status(msg, "❌ Ссылка устарела, пришли её ещё раз.")
         return
 
     height_label = "видео" if height == 0 else f"{height}p"
+    codec_txt = f" · {codec}" if codec else ""
     timeout = httpx.Timeout(300.0, connect=10.0)
 
     # Прогресс выводим в отдельное заметное текстовое сообщение: подпись под
     # фото-постером слишком мелкая. Постер остаётся видимым во время скачивания.
     if _is_photo_message(msg):
         try:
-            progress_msg = await msg.answer(f"⏳ Скачиваю {height_label}…")
+            progress_msg = await msg.answer(f"⏳ Скачиваю {height_label}{codec_txt}…")
         except Exception:
             progress_msg = msg
     else:
         progress_msg = msg
-        await _edit_status(progress_msg, f"⏳ Скачиваю {height_label}…")
+        await _edit_status(progress_msg, f"⏳ Скачиваю {height_label}{codec_txt}…")
 
     payload = {"url": url}
     if height != 0:
         payload["height"] = height
+    if codec:
+        payload["codec"] = codec
 
     async def _post() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -550,7 +582,9 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
 
     post_task = asyncio.create_task(_post())
     poll_task = asyncio.create_task(
-        _poll_progress(progress_msg, height_label, url, None if height == 0 else height, post_task)
+        _poll_progress(
+            progress_msg, height_label, url, None if height == 0 else height, post_task, codec
+        )
     )
     try:
         try:
@@ -569,7 +603,7 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
                 [
                     InlineKeyboardButton(
                         text="🔄 Попробовать ещё раз",
-                        callback_data=f"fmt:{key}:{height}",
+                        callback_data=f"fmt:{key}:{height}:{codec or ''}",
                     )
                 ]
             ]
@@ -608,7 +642,8 @@ async def _download_and_send(msg: types.Message, key: str, height: int) -> None:
     dur = body.get("duration_min")
 
     height_label = f" ({height}p)" if height else ""
-    caption_parts = [f"🎬 {title}{height_label}"]
+    codec_caption = f" · {codec}" if codec else ""
+    caption_parts = [f"🎬 {title}{height_label}{codec_caption}"]
     if dur:
         caption_parts.append(f"⏱️ Длительность: ~{dur} мин")
     caption_parts.append(url)

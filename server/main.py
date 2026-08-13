@@ -25,6 +25,7 @@ _MEDIA_TYPES = {
 class DownloadRequest(BaseModel):
     url: str
     height: int | None = None
+    codec: str | None = None
 
 
 class FormatsRequest(BaseModel):
@@ -34,11 +35,12 @@ class FormatsRequest(BaseModel):
 class ProgressRequest(BaseModel):
     url: str
     height: int | None = None
+    codec: str | None = None
 
 
 @app.post("/progress")
 def get_progress(req: ProgressRequest):
-    progress = downloader.get_progress(req.url, req.height)
+    progress = downloader.get_progress(req.url, req.height, req.codec)
     if progress is None:
         return {"ok": True, "active": False}
     if progress.get("status") == "extracting" and progress.get("started_at"):
@@ -63,7 +65,7 @@ def formats(req: FormatsRequest):
 
 @app.post("/download")
 def download(req: DownloadRequest):
-    result = downloader.download(req.url, req.height)
+    result = downloader.download(req.url, req.height, codec=req.codec)
     if result.get("busy"):
         return JSONResponse(status_code=503, content={"ok": False, "error": result["error"]})
     if result.get("error"):
