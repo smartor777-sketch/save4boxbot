@@ -185,35 +185,29 @@ def _friendly_error(error) -> str:
     return str(error)
 
 
-def _format_label(fmt: dict, compact: bool = False) -> str:
+def _format_label(fmt: dict) -> str:
     height = fmt["height"]
     size = fmt.get("filesize")
-    codec = fmt.get("codec")
     if height == 0:
         return "⬇️ Скачать видео"
-    if compact:
-        codec_txt = f"{codec} · " if codec else ""
-        if size is None:
-            return f"{codec_txt}~размер"
-        return f"{codec_txt}{_size_label(size)}"
-    codec_txt = f" · {codec}" if codec else ""
     if size is None:
-        return f"{height}p{codec_txt} · ~размер"
-    label = f"{height}p{codec_txt} · {_size_label(size)}"
+        return f"{height}p · ~размер"
+    label = f"{height}p · {_size_label(size)}"
     if size > SLOW_SIZE:
         label += " (долго)"
     return label
 
 
-# Цвет inline-кнопок Telegram: None=стандартный, 1=оранжевый, 2=фиолетовый,
-# 3=синий, 4=зелёный. Кодек-кнопки красим по типу кодека, чтобы расшифровку
-# (ряд ниже «Отменить») можно было сопоставить с рядами форматов.
+# Стиль текстовых inline-кнопок Telegram: None=стандартный,
+# "primary"=синий, "success"=зелёный, "danger"=красный.
+# Кодек-кнопки красим по типу кодека, чтобы расшифровку (ряд ниже
+# «Отменить») можно было сопоставить с рядами форматов.
 _CODEC_COLORS = {
     "h264": None,
-    "vp9": 4,
-    "hevc": 2,
-    "av1": 3,
-    "other": 1,
+    "vp9": "success",
+    "hevc": None,
+    "av1": "primary",
+    "other": None,
 }
 
 _CODEC_NAMES = {
@@ -228,7 +222,7 @@ _CODEC_NAMES = {
 def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
     rows = []
     # Группируем по высоте: несколько кодеков одной высоты — в один ряд
-    # (компактные метки «H.264 · 12 МБ»), единственный кодек — обычной кнопкой.
+    # (надписи «1080p · 20 МБ», кодек передан цветом кнопки).
     by_height: dict[int, list[dict]] = {}
     seen_codecs: dict[str, str] = {}
     for fmt in formats:
@@ -239,29 +233,16 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
                 seen_codecs.setdefault(ck, fmt.get("codec") or _CODEC_NAMES.get(ck, ck))
     for height in sorted(by_height):
         group = by_height[height]
-        if len(group) == 1:
-            fmt = group[0]
-            ck = fmt.get("codec_key") or ""
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=_format_label(fmt),
-                        callback_data=f"fmt:{key}:{height}:{ck}",
-                        color=_CODEC_COLORS.get(ck),
-                    )
-                ]
-            )
-        else:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=_format_label(fmt, compact=True),
-                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
-                        color=_CODEC_COLORS.get(fmt.get("codec_key") or ""),
-                    )
-                    for fmt in group
-                ]
-            )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_format_label(fmt),
+                    callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}",
+                    style=_CODEC_COLORS.get(fmt.get("codec_key") or ""),
+                )
+                for fmt in group
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(
@@ -279,7 +260,7 @@ def _build_keyboard(formats: list[dict], key: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text=_CODEC_NAMES.get(ck, name),
                     callback_data=f"legend:{ck}",
-                    color=_CODEC_COLORS.get(ck),
+                    style=_CODEC_COLORS.get(ck),
                 )
                 for ck, name in sorted(seen_codecs.items())
             ]
