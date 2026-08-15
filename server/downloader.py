@@ -211,6 +211,13 @@ YT_PLAYER_CLIENTS = [c.strip() for c in os.getenv(
     "YT_PLAYER_CLIENTS", "web_embedded,android,web_music"
 ).split(",") if c.strip()]
 
+# Внешний JS-рантайм для решения подписей/n-challenge YouTube (EJS).
+# Пустой список = не использовать. С Debian-пакета Node 20 ejs не работает,
+# нужен node >= 22 или deno >= 2.3.
+JS_RUNTIMES = [r.strip() for r in os.getenv(
+    "JS_RUNTIMES", "node"
+).split(",") if r.strip()]
+
 
 def _base_opts(output_template: str, http_chunk_size: int | None = None) -> dict:
     opts = {
@@ -230,6 +237,8 @@ def _base_opts(output_template: str, http_chunk_size: int | None = None) -> dict
         opts["http_chunk_size"] = http_chunk_size
     if YT_PLAYER_CLIENTS:
         opts["extractor_args"] = {"youtube": {"player_client": YT_PLAYER_CLIENTS}}
+    if JS_RUNTIMES:
+        opts["js_runtimes"] = JS_RUNTIMES
     impersonate = os.getenv("IMPERSONATE", "chrome").strip()
     if impersonate:
         from yt_dlp.networking.impersonate import ImpersonateTarget
