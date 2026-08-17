@@ -29,6 +29,7 @@ VK_RE = re.compile(
     r"|\bvk(?:video)?\.(?:com|ru)/[^?\s]*\?.*?z=(?:video|clip)(-?\d+_\d+)"
 )
 RUTUBE_RE = re.compile(r"\brutube\.ru")
+COUB_RE = re.compile(r"\bcoub\.com")
 YANDEX_VIDEO_RE = re.compile(r"\byandex\.\w{2,3}(?:\.(?:am|ge|il|tr))?/video/(?:touch/)?preview")
 
 INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -152,7 +153,7 @@ def is_instagram(url: str) -> bool:
 
 
 def is_supported(url: str) -> str | None:
-    """Возвращает платформу ('youtube'/'tiktok'/'instagram'/'vk'/'rutube'/'yandex') или None."""
+    """Возвращает платформу ('youtube'/'tiktok'/'instagram'/'vk'/'rutube'/'coub'/'yandex') или None."""
     u = url or ""
     if YOUTUBE_RE.search(u):
         return "youtube"
@@ -164,6 +165,8 @@ def is_supported(url: str) -> str | None:
         return "vk"
     if RUTUBE_RE.search(u):
         return "rutube"
+    if COUB_RE.search(u):
+        return "coub"
     if YANDEX_VIDEO_RE.search(u):
         return "yandex"
     return None
@@ -362,7 +365,7 @@ def list_formats(url: str) -> dict:
 
     platform = is_supported(url)
     if not platform:
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Яндекс Видео)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео)"}
 
     if platform == "instagram":
         try:
@@ -429,6 +432,33 @@ def list_formats(url: str) -> dict:
 def _group_formats(info: dict, platform: str) -> list[dict]:
     """Группирует форматы по высоте и коду (h264/vp9/hevc/av1): одна высота
     может давать несколько кодеков с разным размером."""
+    # Coub: видео (h264, без height/vcodec в метаданных) и аудио (mp3) отдаются
+    # отдельными файлами. Группируем вручную по качеству med/high.
+    if platform == "coub":
+        by_name = {}
+        for f in info.get("formats", []):
+            by_name[f["format_id"]] = f
+        quality = {"med": 360, "high": 720}
+        formats = []
+        for q, height in quality.items():
+            v = by_name.get(f"html5-video-{q}")
+            a = by_name.get(f"html5-audio-{q}")
+            if not v:
+                continue
+            v_size = v.get("filesize") or v.get("filesize_approx")
+            a_size = a.get("filesize") or a.get("filesize_approx") if a else None
+            total = (v_size or 0) + (a_size or 0)
+            formats.append(
+                {
+                    "height": height,
+                    "format_id": v["format_id"],
+                    "filesize": total or None,
+                    "codec": "H.264",
+                    "codec_key": "h264",
+                }
+            )
+        return formats
+
     by_height: dict[int, dict[str, dict]] = {}
     audio_sizes = []
     for f in info.get("formats", []):
@@ -511,7 +541,7 @@ def download(
     import yt_dlp
 
     if not is_supported(url):
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Яндекс Видео)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео)"}
 
     if not DOWNLOAD_SEM.acquire(blocking=False):
         return {
@@ -635,6 +665,18 @@ def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -
         "hevc": "[vcodec~=^(hvc1|hev1)]",
         "other": "",
     }.get(codec or "", "")
+
+    # Coub: видео и аудио отдельными файлами (html5-video-med/high + html5-audio-*),
+    # quality: 360p→med, 720p→high. Форматы без height/vcodec, поэтому селектор
+    # по format_id; итог склеивается в mp4 (merge_output_format).
+    if platform == "coub":
+        q = "med" if height == 360 else "high"
+        if height == 360 or height == 720:
+            return (
+                f"html5-video-{q}+html5-audio-{q}/best",
+                f"_{height}p",
+            )
+        return "best", "_720p"
 
     # TikTok отдаёт комбинированные mp4 (видео+аудио в одном файле), отдельных
     # аудио-потоков нет — селектор по best с учётом высоты и кодека.
