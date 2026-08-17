@@ -744,6 +744,97 @@ def _estimate_size(v_tbr: float | None, a_tbr: float | None, duration: float | N
     return int(kbps / 8 * duration * 1024)
 
 
+def _do_download_coub(
+    url: str,
+    height: int | None = None,
+    task_key: tuple[str, int | None, str | None] | None = None,
+) -> dict:
+    """Coub: видео-цикл короче аудио (песни) в разы. Скачиваем оба файла
+    отдельно и склеиваем через ffmpeg: видео повторяется (-stream_loop -1)
+    до конца музыки (-shortest). Аудио перекодируем в AAC — так файл
+    воспроизводится в Telegram без заморозки на последнем кадре."""
+    import subprocess
+    import yt_dlp
+
+    if task_key is not None:
+        _register_progress(task_key, status="extracting", started_at=time.time())
+
+    q = "med" if height == 360 else "high"
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = os.path.join(tmp, "video.%(ext)s")
+            audio_path = os.path.join(tmp, "audio.%(ext)s")
+
+            vopts = _base_opts(video_path)
+            vopts["format"] = f"html5-video-{q}"
+            vopts["progress_hooks"] = [_timeout_hook_builder(task_key)]
+            with yt_dlp.YoutubeDL(vopts) as ydl:
+                vmeta = _extract_info_with_retry(ydl, url, download=True)
+
+            aopts = _base_opts(audio_path)
+            aopts["format"] = f"html5-audio-{q}"
+            aopts["progress_hooks"] = [_timeout_hook_builder(task_key)]
+            with yt_dlp.YoutubeDL(aopts) as ydl:
+                _extract_info_with_retry(ydl, url, download=True)
+
+            vid = _first_downloaded_path(vmeta)
+            if not vid or not os.path.exists(vid):
+                return {"error": "Файл не был создан"}
+            audio = os.path.join(tmp, "audio.mp3")
+            if not os.path.exists(audio):
+                return {"error": "Аудио не было создано"}
+
+            out = os.path.join(tmp, f"out_{q}.mp4")
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-stream_loop", "-1", "-i", vid,
+                "-i", audio,
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-shortest", "-movflags", "+faststart", out,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+            size = os.path.getsize(out)
+            if size > MAX_FILESIZE_BYTES:
+                return {
+                    "error": (
+                        f"Видео слишком большое ({size / 1024 / 1024:.0f} МБ), "
+                        f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ"
+                    )
+                }
+
+            title = vmeta.get("title") or ""
+            target = os.path.join(DOWNLOAD_DIR, f"{_safe_name(title)} [coub]{'_360p' if q == 'med' else '_720p'}.mp4")
+            shutil.move(out, target)
+
+            return {
+                "filename": os.path.basename(target),
+                "path": target,
+                "title": title,
+                "duration_sec": vmeta.get("duration"),
+                "duration_min": round((vmeta.get("duration") or 0) / 60, 1),
+                "filesize": size,
+            }
+    except subprocess.CalledProcessError as e:
+        return {"error": f"Не удалось склеить видео и аудио: {e.stderr[:200]}"}
+    except DownloadTimeoutError as e:
+        return {"error": str(e)}
+    except FileTooBigError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Не удалось скачать: {e}"}
+    finally:
+        if task_key is not None:
+            _unregister_progress(task_key)
+
+
+def _safe_name(name: str) -> str:
+    """Имя файла без символов, недопустимых в файловой системе."""
+    keep = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+    return keep or "coub"
+
+
 def _do_download(url: str, height: int | None = None, format_id: str | None = None,
                  codec: str | None = None,
                  task_key: tuple[str, int | None, str | None] | None = None) -> dict:
@@ -753,6 +844,9 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
 
     if platform == "instagram":
         return _do_download_instagram(url, task_key)
+
+    if platform == "coub":
+        return _do_download_coub(url, height, task_key)
 
     fmt_sel, suffix = _fmt_selector(platform, height, codec)
 
