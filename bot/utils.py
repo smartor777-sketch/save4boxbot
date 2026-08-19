@@ -41,6 +41,9 @@ _RUTUBE_RE = re.compile(
     r"rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/([\da-z]{32})"
 )
 
+# Coub — https://coub.com/view/{id}
+_COUB_RE = re.compile(r"(?:www\.)?coub\.com/(?:view|embed|video)/([\w\-]+)")
+
 
 def _video_id_from(url: str) -> str | None:
     for pattern in (_SHORTS_RE, _LIVE_RE, _EMBED_RE, _PATH_RE):
@@ -153,6 +156,20 @@ def extract_rutube_url(text: str) -> tuple[str, str] | None:
     return raw, m.group(1)
 
 
+def extract_coub_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL coub, coub_id) или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    m = _COUB_RE.search(raw)
+    if not m:
+        return None
+
+    return f"https://coub.com/view/{m.group(1)}", m.group(1)
+
+
 def extract_video(text: str) -> tuple[str, str, str] | None:
     """Возвращает (platform, url, key) или None."""
     parsed = extract_youtube_url(text)
@@ -179,4 +196,8 @@ def extract_video(text: str) -> tuple[str, str, str] | None:
     if parsed:
         url, key = parsed
         return "rutube", url, key
+    parsed = extract_coub_url(text)
+    if parsed:
+        url, key = parsed
+        return "coub", url, key
     return None

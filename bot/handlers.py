@@ -295,7 +295,7 @@ def _allowed(formats: list[dict]) -> list[dict]:
 
 START_TEXT = (
     "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
-    "Rutube и Яндекс Видео прямо в Telegram.\n\n"
+    "Rutube, Coub и Яндекс Видео прямо в Telegram.\n\n"
     "Просто пришли ссылку на видео — и файл появится здесь "
     "(размер до 50 МБ, при необходимости предложу выбрать качество)."
 )
@@ -356,7 +356,7 @@ async def handle_text(message: types.Message):
         await message.reply(
             "ℹ️ Это не похоже на ссылку для скачивания.\n"
             "Пришли ссылку на видео из YouTube, Instagram, TikTok, "
-            "VK, Rutube или Яндекс Видео."
+            "VK, Rutube, Coub или Яндекс Видео."
         )
         return
     platform, url, key = parsed
