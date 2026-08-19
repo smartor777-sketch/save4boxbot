@@ -749,10 +749,9 @@ def _do_download_coub(
     height: int | None = None,
     task_key: tuple[str, int | None, str | None] | None = None,
 ) -> dict:
-    """Coub: видео-цикл короче аудио (песни) в разы. Скачиваем оба файла
-    отдельно и склеиваем через ffmpeg: видео повторяется (-stream_loop -1)
-    до конца музыки (-shortest). Аудио перекодируем в AAC — так файл
-    воспроизводится в Telegram без заморозки на последнем кадре."""
+    """Coub: видео и аудио отдаются отдельными файлами. Скачиваем оба и
+    склеиваем простым мерджем через ffmpeg без зацикливания/обрезки.
+    Аудио перекодируем в AAC — так файл стримится в Telegram."""
     import subprocess
     import yt_dlp
 
@@ -788,10 +787,10 @@ def _do_download_coub(
             out = os.path.join(tmp, f"out_{q}.mp4")
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-stream_loop", "-1", "-i", vid,
+                "-i", vid,
                 "-i", audio,
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                "-shortest", "-movflags", "+faststart", out,
+                "-movflags", "+faststart", out,
             ]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
 
