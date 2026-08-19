@@ -786,12 +786,25 @@ def _do_download_coub(
                 return {"error": "Аудио не было создано"}
 
             out = os.path.join(tmp, f"out_{q}.mp4")
+            # Точная длина аудио — чтобы видео (с -stream_loop -1) не вылезло
+            # за конец музыки: -shortest режет по потоку, но повтор цикла
+            # завершается на границе кадра и может удлинить файл. Поэтому
+            # жёстко обрезаем по длине аудио через -t.
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", audio,
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            audio_dur = float(probe.stdout.strip())
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-stream_loop", "-1", "-i", vid,
                 "-i", audio,
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                "-shortest", "-movflags", "+faststart", out,
+                "-t", f"{audio_dur:.3f}", "-movflags", "+faststart", out,
             ]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
 
