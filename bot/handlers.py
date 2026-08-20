@@ -242,7 +242,7 @@ def _build_keyboard(
         # У Coub два размера на одно качество: filesize — «как есть»,
         # filesize_1x — «без повторов». Формат показываем, если хоть один
         # вариант влезает в лимит.
-        if _fits_cap(fmt) or _fits_cap(fmt, "filesize_1x"):
+        if _fits_cap(fmt) or ("filesize_1x" in fmt and _fits_cap(fmt, "filesize_1x")):
             by_height.setdefault(fmt["height"], []).append(fmt)
             ck = fmt.get("codec_key") or ""
             if ck and fmt["height"] != 0:
