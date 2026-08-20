@@ -455,7 +455,8 @@ async def handle_format(callback: types.CallbackQuery):
     # Новый формат fmt:{key}:{height}:{codec}[:{loop}]; старые кнопки без
     # кодека/loop тоже работают. loop=1 — как есть, loop=0 — без повторов.
     codec = parts[3] if len(parts) > 3 and parts[3] else None
-    loop = parts[4] == "0" if len(parts) > 4 else True
+    # loop=1 — как есть, loop=0 — без повторов.
+    loop = parts[4] != "0" if len(parts) > 4 else True
     url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
