@@ -433,12 +433,24 @@ def _group_formats(info: dict, platform: str) -> list[dict]:
     """Группирует форматы по высоте и коду (h264/vp9/hevc/av1): одна высота
     может давать несколько кодеков с разным размером."""
     # Coub: видео (h264, без height/vcodec в метаданных) и аудио (mp3) отдаются
-    # отдельными файлами. Группируем вручную по качеству med/high.
+    # отдельными файлами. Группируем вручную по качеству med/high. Финальный
+    # MP4 собирает ffmpeg, поэтому оцениваем его итоговый размер для обоих
+    # режимов: «как есть» (видео зациклено до конца музыки) и «без повторов»
+    # (один проход цикла, аудио обрезано под длину видео).
     if platform == "coub":
         by_name = {}
         for f in info.get("formats", []):
             by_name[f["format_id"]] = f
         quality = {"med": 360, "high": 720}
+        vid_dur = info.get("duration") or 0
+        # Длительность аудио по размеру mp3: med стабильно ~128 кбит/с (CBR),
+        # med и high — одна и та же песня, длительность одинаковая.
+        a_med = by_name.get("html5-audio-med")
+        audio_dur = None
+        if a_med:
+            am = a_med.get("filesize") or a_med.get("filesize_approx")
+            if am:
+                audio_dur = am * 8 / 128000
         formats = []
         for q, height in quality.items():
             v = by_name.get(f"html5-video-{q}")
@@ -447,12 +459,22 @@ def _group_formats(info: dict, platform: str) -> list[dict]:
                 continue
             v_size = v.get("filesize") or v.get("filesize_approx")
             a_size = a.get("filesize") or a.get("filesize_approx") if a else None
-            total = (v_size or 0) + (a_size or 0)
+            # «Без повторов»: один проход видео + аудио AAC 128k (~16 КБ/с),
+            # обрезанное под длину видео-цикла.
+            size_1x = None
+            if v_size and vid_dur:
+                size_1x = v_size + vid_dur * 16000
+            # «Как есть»: видео зациклено до конца аудио (размер растёт
+            # пропорционально длительности) + полное аудио (AAC 128k).
+            size_loop = None
+            if v_size and vid_dur and audio_dur:
+                size_loop = v_size * (audio_dur / vid_dur) + audio_dur * 16000
             formats.append(
                 {
                     "height": height,
                     "format_id": v["format_id"],
-                    "filesize": total or None,
+                    "filesize": size_loop,
+                    "filesize_1x": size_1x,
                     "codec": "H.264",
                     "codec_key": "h264",
                 }

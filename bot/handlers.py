@@ -239,7 +239,10 @@ def _build_keyboard(
     by_height: dict[int, list[dict]] = {}
     seen_codecs: dict[str, str] = {}
     for fmt in formats:
-        if fmt.get("filesize") is None or fmt["filesize"] <= HARD_CAP:
+        # У Coub два размера на одно качество: filesize — «как есть»,
+        # filesize_1x — «без повторов». Формат показываем, если хоть один
+        # вариант влезает в лимит.
+        if _fits_cap(fmt):
             by_height.setdefault(fmt["height"], []).append(fmt)
             ck = fmt.get("codec_key") or ""
             if ck and fmt["height"] != 0:
@@ -250,22 +253,34 @@ def _build_keyboard(
         # до конца музыки) и «без повторов» (один проход цикла). Кодек всегда
         # H.264, цветовая легенда не нужна.
         if platform == "coub":
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"{height}p · как есть",
-                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}:1",
+            for fmt in group:
+                height = fmt["height"]
+                ck = fmt.get("codec_key", "")
+                row = []
+                if _fits_cap(fmt, key="filesize"):
+                    size = fmt.get("filesize")
+                    label = f"{height}p · как есть"
+                    if size:
+                        label += f" · {_size_label(size)}"
+                    row.append(
+                        InlineKeyboardButton(
+                            text=label,
+                            callback_data=f"fmt:{key}:{height}:{ck}:1",
+                        )
                     )
-                    for fmt in group
-                ]
-                + [
-                    InlineKeyboardButton(
-                        text=f"{height}p · без повторов",
-                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}:0",
+                if _fits_cap(fmt, key="filesize_1x"):
+                    size = fmt.get("filesize_1x")
+                    label = f"{height}p · без повторов"
+                    if size:
+                        label += f" · {_size_label(size)}"
+                    row.append(
+                        InlineKeyboardButton(
+                            text=label,
+                            callback_data=f"fmt:{key}:{height}:{ck}:0",
+                        )
                     )
-                    for fmt in group
-                ]
-            )
+                if row:
+                    rows.append(row)
             continue
         # Один формат на высоту — кодек показываем текстом (легенды цветов
         # не будет). Несколько кодеков — кодек передан цветом кнопки.
@@ -307,11 +322,20 @@ def _build_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _fits_cap(fmt: dict, key: str = "filesize") -> bool:
+    size = fmt.get(key)
+    return size is None or size <= HARD_CAP
+
+
 def _allowed(formats: list[dict]) -> list[dict]:
-    return [
-        f for f in formats
-        if f.get("filesize") is None or f["filesize"] <= HARD_CAP
-    ]
+    result = []
+    for f in formats:
+        sizes = [f.get("filesize")]
+        if "filesize_1x" in f:
+            sizes.append(f.get("filesize_1x"))
+        if any(s is None or s <= HARD_CAP for s in sizes):
+            result.append(f)
+    return result
 
 
 START_TEXT = (
@@ -677,7 +701,7 @@ async def _download_and_send(
                 [
                     InlineKeyboardButton(
                         text="🔄 Попробовать ещё раз",
-                        callback_data=f"fmt:{key}:{height}:{codec or ''}",
+                        callback_data=f"fmt:{key}:{height}:{codec or ''}:{'1' if loop else '0'}",
                     )
                 ]
             ]
@@ -714,12 +738,16 @@ async def _download_and_send(
     filename = body["filename"]
     title = body.get("title")
     dur = body.get("duration_min")
+    fsize = body.get("filesize")
 
     height_label = f" ({height}p)" if height else ""
     codec_caption = f" · {codec}" if codec else ""
-    caption_parts = [f"🎬 {title}{height_label}{codec_caption}"]
+    loop_caption = "" if loop else " · без повторов"
+    caption_parts = [f"🎬 {title}{height_label}{codec_caption}{loop_caption}"]
     if dur:
         caption_parts.append(f"⏱️ Длительность: ~{dur} мин")
+    if fsize:
+        caption_parts.append(f"📦 Размер: {_size_label(fsize)}")
     caption_parts.append(url)
     caption = "\n".join(caption_parts)
 

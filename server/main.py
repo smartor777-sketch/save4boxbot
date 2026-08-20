@@ -75,6 +75,7 @@ def download(req: DownloadRequest):
         "ok": True,
         "title": result.get("title"),
         "duration_min": result.get("duration_min"),
+        "filesize": result.get("filesize"),
         "filename": result.get("filename"),
         "files": result.get("files"),
     }
