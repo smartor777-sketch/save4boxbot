@@ -377,6 +377,7 @@ async def stats(message: types.Message):
             f"• VK — {c.get('vk', 0)}\n"
             f"• Rutube — {c.get('rutube', 0)}\n"
             f"• Яндекс Видео — {c.get('yandex', 0)}\n"
+            f"• Coub — {c.get('coub', 0)}\n"
             f"Всего: {c.get('total', 0)}"
         )
 
