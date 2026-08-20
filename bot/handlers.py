@@ -240,7 +240,7 @@ def _build_keyboard(
     seen_codecs: dict[str, str] = {}
     for fmt in formats:
         # У Coub два размера на одно качество: filesize — «как есть»,
-        # filesize_1x — «без повторов». Формат показываем, если хоть один
+        # filesize_1x — «no loop». Формат показываем, если хоть один
         # вариант влезает в лимит.
         if _fits_cap(fmt) or ("filesize_1x" in fmt and _fits_cap(fmt, "filesize_1x")):
             by_height.setdefault(fmt["height"], []).append(fmt)
@@ -250,7 +250,7 @@ def _build_keyboard(
     for height in sorted(by_height):
         group = by_height[height]
         # Coub: у каждого качества два режима — «как есть» (видео зациклено
-        # до конца музыки) и «без повторов» (один проход цикла). Кодек всегда
+        # до конца музыки) и «no loop» (один проход цикла). Кодек всегда
         # H.264, цветовая легенда не нужна.
         if platform == "coub":
             for fmt in group:
@@ -270,7 +270,7 @@ def _build_keyboard(
                     )
                 if _fits_cap(fmt, key="filesize_1x"):
                     size = fmt.get("filesize_1x")
-                    label = f"{height}p · без повторов"
+                    label = f"{height}p · no loop"
                     if size:
                         label += f" · {_size_label(size)}"
                     row.append(
@@ -477,9 +477,9 @@ async def handle_format(callback: types.CallbackQuery):
     key = parts[1]
     height = int(parts[2])
     # Новый формат fmt:{key}:{height}:{codec}[:{loop}]; старые кнопки без
-    # кодека/loop тоже работают. loop=1 — как есть, loop=0 — без повторов.
+    # кодека/loop тоже работают. loop=1 — как есть, loop=0 — no loop.
     codec = parts[3] if len(parts) > 3 and parts[3] else None
-    # loop=1 — как есть, loop=0 — без повторов.
+    # loop=1 — как есть, loop=0 — no loop.
     loop = parts[4] != "0" if len(parts) > 4 else True
     url = URLS.get(key)
     if not url:
@@ -742,7 +742,7 @@ async def _download_and_send(
 
     height_label = f" ({height}p)" if height else ""
     codec_caption = f" · {codec}" if codec else ""
-    loop_caption = "" if loop else " · без повторов"
+    loop_caption = "" if loop else " · no loop"
     caption_parts = [f"🎬 {title}{height_label}{codec_caption}{loop_caption}"]
     if dur:
         caption_parts.append(f"⏱️ Длительность: ~{dur} мин")
