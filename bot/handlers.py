@@ -246,6 +246,27 @@ def _build_keyboard(
                 seen_codecs.setdefault(ck, fmt.get("codec") or _CODEC_NAMES.get(ck, ck))
     for height in sorted(by_height):
         group = by_height[height]
+        # Coub: у каждого качества два режима — «как есть» (видео зациклено
+        # до конца музыки) и «без повторов» (один проход цикла). Кодек всегда
+        # H.264, цветовая легенда не нужна.
+        if platform == "coub":
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{height}p · как есть",
+                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}:1",
+                    )
+                    for fmt in group
+                ]
+                + [
+                    InlineKeyboardButton(
+                        text=f"{height}p · без повторов",
+                        callback_data=f"fmt:{key}:{height}:{fmt.get('codec_key', '')}:0",
+                    )
+                    for fmt in group
+                ]
+            )
+            continue
         # Один формат на высоту — кодек показываем текстом (легенды цветов
         # не будет). Несколько кодеков — кодек передан цветом кнопки.
         show_codec = len(group) == 1 or platform == "tiktok"
@@ -431,20 +452,22 @@ async def handle_format(callback: types.CallbackQuery):
     parts = callback.data.split(":")
     key = parts[1]
     height = int(parts[2])
-    # Новый формат fmt:{key}:{height}:{codec}; старые кнопки без кодека тоже работают.
+    # Новый формат fmt:{key}:{height}:{codec}[:{loop}]; старые кнопки без
+    # кодека/loop тоже работают. loop=1 — как есть, loop=0 — без повторов.
     codec = parts[3] if len(parts) > 3 and parts[3] else None
+    loop = parts[4] == "0" if len(parts) > 4 else True
     url = URLS.get(key)
     if not url:
         await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
         return
 
-    marker = f"fmt:{key}:{height}:{codec or ''}"
+    marker = f"fmt:{key}:{height}:{codec or ''}:{0 if not loop else 1}"
     if marker in _IN_FLIGHT:
         await callback.answer("⏳ Уже скачиваю, чуть позже…", show_alert=False)
         return
     _IN_FLIGHT.add(marker)
     try:
-        await _download_and_send(callback.message, key, height, codec)
+        await _download_and_send(callback.message, key, height, codec, loop=loop)
     finally:
         _IN_FLIGHT.discard(marker)
 
@@ -593,7 +616,8 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
 
 
 async def _download_and_send(
-    msg: types.Message, key: str, height: int, codec: str | None = None
+    msg: types.Message, key: str, height: int, codec: str | None = None,
+    loop: bool = True,
 ) -> None:
     url = URLS.get(key)
     if not url:
@@ -620,6 +644,8 @@ async def _download_and_send(
         payload["height"] = height
     if codec:
         payload["codec"] = codec
+    if not loop:
+        payload["loop"] = False
 
     async def _post() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout) as client:
