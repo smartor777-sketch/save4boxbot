@@ -537,6 +537,7 @@ def download(
     height: int | None = None,
     format_id: str | None = None,
     codec: str | None = None,
+    loop: bool = True,
 ) -> dict:
     import yt_dlp
 
@@ -551,7 +552,7 @@ def download(
 
     try:
         result = _do_download(
-            url, height, format_id, codec, task_key=(url, height, codec)
+            url, height, format_id, codec, task_key=(url, height, codec), loop=loop
         )
         if "error" not in result:
             stats.record_download(is_supported(url))
@@ -748,11 +749,17 @@ def _do_download_coub(
     url: str,
     height: int | None = None,
     task_key: tuple[str, int | None, str | None] | None = None,
+    loop: bool = True,
 ) -> dict:
     """Coub: видео и аудио отдаются отдельными файлами. Скачиваем оба и
-    склеиваем через ffmpeg: видео повторяется (-stream_loop -1) до конца
-    музыки (-shortest). Так итоговый файл всегда длиной с аудио, а не с
-    видео-циклом. Аудио перекодируем в AAC — файл стримится в Telegram."""
+    склеиваем через ffmpeg.
+
+    loop=True (по умолчанию): видео повторяется (-stream_loop -1) до конца
+    музыки (-shortest) — файл длиной с аудио, цикл повторён несколько раз.
+
+    loop=False: один проход цикла. Аудио обрезается под точную длину видео
+    (длина одного цикла), повторов нет. Аудио перекодируем в AAC — файл
+    стримится в Telegram."""
     import subprocess
     import yt_dlp
 
@@ -786,26 +793,47 @@ def _do_download_coub(
                 return {"error": "Аудио не было создано"}
 
             out = os.path.join(tmp, f"out_{q}.mp4")
-            # Точная длина аудио — чтобы видео (с -stream_loop -1) не вылезло
-            # за конец музыки: -shortest режет по потоку, но повтор цикла
-            # завершается на границе кадра и может удлинить файл. Поэтому
-            # жёстко обрезаем по длине аудио через -t.
-            probe = subprocess.run(
+            # Точная длина видео — длина одного цикла (нужна и для обрезки
+            # аудио, и чтобы видео с -stream_loop -1 не вылезло за конец
+            # музыки: -shortest режет по потоку, но повтор цикла завершается
+            # на границе кадра и может удлинить файл).
+            probe_v = subprocess.run(
                 [
                     "ffprobe", "-v", "error",
                     "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1", audio,
+                    "-of", "default=noprint_wrappers=1:nokey=1", vid,
                 ],
                 capture_output=True, text=True, check=True,
             )
-            audio_dur = float(probe.stdout.strip())
-            cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-stream_loop", "-1", "-i", vid,
-                "-i", audio,
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                "-t", f"{audio_dur:.3f}", "-movflags", "+faststart", out,
-            ]
+            vid_dur = float(probe_v.stdout.strip())
+
+            if loop:
+                # Полная длина аудио — жёсткая обрезка через -t.
+                probe_a = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", audio,
+                    ],
+                    capture_output=True, text=True, check=True,
+                )
+                audio_dur = float(probe_a.stdout.strip())
+                cmd = [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-stream_loop", "-1", "-i", vid,
+                    "-i", audio,
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-t", f"{audio_dur:.3f}", "-movflags", "+faststart", out,
+                ]
+            else:
+                # Один проход: аудио обрезаем под длину видео-цикла.
+                cmd = [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", vid,
+                    "-i", audio,
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-t", f"{vid_dur:.3f}", "-movflags", "+faststart", out,
+                ]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
 
             size = os.path.getsize(out)
@@ -818,15 +846,16 @@ def _do_download_coub(
                 }
 
             title = vmeta.get("title") or ""
-            target = os.path.join(DOWNLOAD_DIR, f"{_safe_name(title)} [coub]{'_360p' if q == 'med' else '_720p'}.mp4")
+            tag = "_1x" if not loop else ""
+            target = os.path.join(DOWNLOAD_DIR, f"{_safe_name(title)} [coub]{tag}{'_360p' if q == 'med' else '_720p'}.mp4")
             shutil.move(out, target)
 
             return {
                 "filename": os.path.basename(target),
                 "path": target,
                 "title": title,
-                "duration_sec": vmeta.get("duration"),
-                "duration_min": round((vmeta.get("duration") or 0) / 60, 1),
+                "duration_sec": vid_dur if not loop else vmeta.get("duration"),
+                "duration_min": round((vid_dur if not loop else vmeta.get("duration") or 0) / 60, 1),
                 "filesize": size,
             }
     except subprocess.CalledProcessError as e:
@@ -850,7 +879,8 @@ def _safe_name(name: str) -> str:
 
 def _do_download(url: str, height: int | None = None, format_id: str | None = None,
                  codec: str | None = None,
-                 task_key: tuple[str, int | None, str | None] | None = None) -> dict:
+                 task_key: tuple[str, int | None, str | None] | None = None,
+                 loop: bool = True) -> dict:
     import yt_dlp
 
     platform = is_supported(url)
@@ -859,7 +889,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
         return _do_download_instagram(url, task_key)
 
     if platform == "coub":
-        return _do_download_coub(url, height, task_key)
+        return _do_download_coub(url, height, task_key, loop=loop)
 
     fmt_sel, suffix = _fmt_selector(platform, height, codec)
 

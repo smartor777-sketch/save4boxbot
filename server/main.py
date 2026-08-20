@@ -26,6 +26,7 @@ class DownloadRequest(BaseModel):
     url: str
     height: int | None = None
     codec: str | None = None
+    loop: bool = True
 
 
 class FormatsRequest(BaseModel):
@@ -65,7 +66,7 @@ def formats(req: FormatsRequest):
 
 @app.post("/download")
 def download(req: DownloadRequest):
-    result = downloader.download(req.url, req.height, codec=req.codec)
+    result = downloader.download(req.url, req.height, codec=req.codec, loop=req.loop)
     if result.get("busy"):
         return JSONResponse(status_code=503, content={"ok": False, "error": result["error"]})
     if result.get("error"):
