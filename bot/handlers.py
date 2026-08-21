@@ -338,6 +338,18 @@ def _allowed(formats: list[dict]) -> list[dict]:
     return result
 
 
+def _filter_by_height(formats: list[dict], min_h: int = 480) -> list[dict]:
+    """Оставляем разрешения от min_h и выше; если таких нет — ближайшее меньшее."""
+    with_h = [f for f in formats if f.get("height", 0) != 0]
+    if not with_h:
+        return formats
+    eligible = [f for f in with_h if f["height"] >= min_h]
+    if eligible:
+        return eligible
+    max_h = max(f["height"] for f in with_h)
+    return [f for f in with_h if f["height"] == max_h]
+
+
 START_TEXT = (
     "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
     "Rutube, Coub и Яндекс Видео прямо в Telegram.\n\n"
@@ -431,6 +443,7 @@ async def handle_text(message: types.Message):
 
     formats = body["formats"]
     available = _allowed(formats)
+    available = _filter_by_height(available)
     if not available:
         await status.edit_text(
             "❌ Видео невозможно скачать — слишком большое (лимит Telegram 50 МБ)."
