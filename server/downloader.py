@@ -484,6 +484,9 @@ def _group_formats(info: dict, platform: str) -> list[dict]:
     by_height: dict[int, dict[str, dict]] = {}
     audio_sizes = []
     for f in info.get("formats", []):
+        # VK/Яндекс: HLS (m3u8) виснет с серверных IP, предлагаем только DASH.
+        if platform in ("vk", "yandex") and "m3u8" in (f.get("protocol") or ""):
+            continue
         height = f.get("height")
         vcodec = f.get("vcodec")
         acodec = f.get("acodec")
