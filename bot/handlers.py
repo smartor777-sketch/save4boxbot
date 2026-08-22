@@ -352,7 +352,7 @@ def _filter_by_height(formats: list[dict], min_h: int = 480) -> list[dict]:
 
 START_TEXT = (
     "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
-    "Rutube, Coub и Яндекс Видео прямо в Telegram.\n\n"
+    "Rutube, Coub, Яндекс Видео и Dzen прямо в Telegram.\n\n"
     "Просто пришли ссылку на видео — и файл появится здесь "
     "(размер до 50 МБ, при необходимости предложу выбрать качество)."
 )
@@ -390,6 +390,7 @@ async def stats(message: types.Message):
             f"• Rutube — {c.get('rutube', 0)}\n"
             f"• Яндекс Видео — {c.get('yandex', 0)}\n"
             f"• Coub — {c.get('coub', 0)}\n"
+            f"• Dzen — {c.get('dzen', 0)}\n"
             f"Всего: {c.get('total', 0)}"
         )
 
@@ -414,7 +415,7 @@ async def handle_text(message: types.Message):
         await message.reply(
             "ℹ️ Это не похоже на ссылку для скачивания.\n"
             "Пришли ссылку на видео из YouTube, Instagram, TikTok, "
-            "VK, Rutube, Coub или Яндекс Видео."
+            "VK, Rutube, Coub, Яндекс Видео или Dzen."
         )
         return
     platform, url, key = parsed

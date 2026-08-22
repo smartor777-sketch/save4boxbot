@@ -31,6 +31,7 @@ VK_RE = re.compile(
 RUTUBE_RE = re.compile(r"\brutube\.ru")
 COUB_RE = re.compile(r"\bcoub\.com")
 YANDEX_VIDEO_RE = re.compile(r"\byandex\.\w{2,3}(?:\.(?:am|ge|il|tr))?/video/(?:touch/)?preview")
+DZEN_RE = re.compile(r"\bdzen\.ru")
 
 INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -153,7 +154,7 @@ def is_instagram(url: str) -> bool:
 
 
 def is_supported(url: str) -> str | None:
-    """Возвращает платформу ('youtube'/'tiktok'/'instagram'/'vk'/'rutube'/'coub'/'yandex') или None."""
+    """Возвращает платформу ('youtube'/'tiktok'/'instagram'/'vk'/'rutube'/'coub'/'yandex'/'dzen') или None."""
     u = url or ""
     if YOUTUBE_RE.search(u):
         return "youtube"
@@ -169,6 +170,8 @@ def is_supported(url: str) -> str | None:
         return "coub"
     if YANDEX_VIDEO_RE.search(u):
         return "yandex"
+    if DZEN_RE.search(u):
+        return "dzen"
     return None
 
 
@@ -365,7 +368,7 @@ def list_formats(url: str) -> dict:
 
     platform = is_supported(url)
     if not platform:
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео / Dzen)"}
 
     if platform == "instagram":
         try:
@@ -484,8 +487,8 @@ def _group_formats(info: dict, platform: str) -> list[dict]:
     by_height: dict[int, dict[str, dict]] = {}
     audio_sizes = []
     for f in info.get("formats", []):
-        # VK/Яндекс: HLS (m3u8) виснет с серверных IP, предлагаем только DASH.
-        if platform in ("vk", "yandex") and "m3u8" in (f.get("protocol") or ""):
+        # VK/Яндекс/Dzen: HLS (m3u8) виснет с серверных IP, предлагаем только DASH.
+        if platform in ("vk", "yandex", "dzen") and "m3u8" in (f.get("protocol") or ""):
             continue
         height = f.get("height")
         vcodec = f.get("vcodec")
@@ -567,7 +570,7 @@ def download(
     import yt_dlp
 
     if not is_supported(url):
-        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео)"}
+        return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео / Dzen)"}
 
     if not DOWNLOAD_SEM.acquire(blocking=False):
         return {
@@ -679,8 +682,8 @@ def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -
     # поэтому исключаем его и берём single-file DASH-форматы. Аудио капаем
     # ~134 кбит/с (ближайшая ступенька VK), чтобы длинные ролики не раздувались
     # сверх лимита 50 МБ.
-    no_hls = "[protocol!*=m3u8]" if platform in ("vk", "yandex") else ""
-    audio_cap = "[tbr<=136]" if platform in ("vk", "yandex") else ""
+    no_hls = "[protocol!*=m3u8]" if platform in ("vk", "yandex", "dzen") else ""
+    audio_cap = "[tbr<=136]" if platform in ("vk", "yandex", "dzen") else ""
 
     vcodec_filter = {
         "h264": "[vcodec^=avc1]",
@@ -754,7 +757,7 @@ def _chosen_audio(formats: list[dict], platform: str) -> dict | None:
         f for f in formats
         if f.get("vcodec") == "none" and f.get("acodec") and f["acodec"] != "none"
     ]
-    if platform in ("vk", "yandex"):
+    if platform in ("vk", "yandex", "dzen"):
         audio = [f for f in audio if not str(f.get("protocol") or "").startswith("m3u8")]
         capped = [f for f in audio if (f.get("tbr") or 0) <= 136]
         if capped:

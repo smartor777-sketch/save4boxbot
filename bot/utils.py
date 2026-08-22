@@ -44,6 +44,9 @@ _RUTUBE_RE = re.compile(
 # Coub — https://coub.com/view/{id}
 _COUB_RE = re.compile(r"(?:www\.)?coub\.com/(?:view|embed|video)/([\w\-]+)")
 
+# Dzen — https://dzen.ru/video/watch/{id}
+_DZEN_RE = re.compile(r"dzen\.ru/video/watch/([\w\-]+)")
+
 
 def _video_id_from(url: str) -> str | None:
     for pattern in (_SHORTS_RE, _LIVE_RE, _EMBED_RE, _PATH_RE):
@@ -170,6 +173,20 @@ def extract_coub_url(text: str) -> tuple[str, str] | None:
     return f"https://coub.com/view/{m.group(1)}", m.group(1)
 
 
+def extract_dzen_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL dzen, video_id) или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    m = _DZEN_RE.search(raw)
+    if not m:
+        return None
+
+    return f"https://dzen.ru/video/watch/{m.group(1)}", m.group(1)
+
+
 def extract_video(text: str) -> tuple[str, str, str] | None:
     """Возвращает (platform, url, key) или None."""
     parsed = extract_youtube_url(text)
@@ -200,4 +217,8 @@ def extract_video(text: str) -> tuple[str, str, str] | None:
     if parsed:
         url, key = parsed
         return "coub", url, key
+    parsed = extract_dzen_url(text)
+    if parsed:
+        url, key = parsed
+        return "dzen", url, key
     return None
