@@ -49,15 +49,33 @@ async def _edit_status(msg: types.Message, text: str, kb: InlineKeyboardMarkup |
     вторично, а падение тут теряет уже скачанный файл.
     """
     try:
+        # reply_markup=None в aiogram 3.x НЕ снимает клавиатуру — оставляет
+        # прежнюю. Чтобы убрать кнопки, передаём пустой markup.
+        markup = kb if kb is not None else InlineKeyboardMarkup(inline_keyboard=[])
         if _is_photo_message(msg):
-            await msg.edit_caption(text, reply_markup=kb)
+            await msg.edit_caption(text, reply_markup=markup)
         else:
-            await msg.edit_text(text, reply_markup=kb)
+            await msg.edit_text(text, reply_markup=markup)
     except TelegramBadRequest as e:
         if "not modified" not in str(e):
             raise
     except TelegramRetryAfter as e:
         logger.warning("status edit rate-limited, skip: %s", e)
+
+
+def _cancel_kb(key: str) -> InlineKeyboardMarkup:
+    """Красная кнопка «Отменить скачивание» под индикатором прогресса."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить скачивание",
+                    callback_data=f"cancel:{key}",
+                    style="danger",
+                )
+            ]
+        ]
+    )
 
 
 async def _poll_progress(
@@ -67,12 +85,14 @@ async def _poll_progress(
     height: int | None,
     post_task: asyncio.Task,
     codec: str | None = None,
+    key: str | None = None,
 ) -> None:
     """Показывает стадию и процент скачивания, пока висит POST /download."""
     frames = ("🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛")
     idx = 0
     last_text = None
     last_edit = 0.0
+    kb = _cancel_kb(key) if key else None
     while not post_task.done():
         text = None
         try:
@@ -115,7 +135,7 @@ async def _poll_progress(
             last_text = text
             last_edit = now
             try:
-                await _edit_status(status_msg, text)
+                await _edit_status(status_msg, text, kb)
             except Exception as e:
                 logger.warning("progress status edit failed: %s", e)
         idx += 1
@@ -666,7 +686,7 @@ async def _download_and_send(
 
     height_label = "видео" if height == 0 else f"{height}p"
     codec_txt = f" · {codec}" if codec else ""
-    timeout = httpx.Timeout(300.0, connect=10.0)
+    timeout = httpx.Timeout(600.0, connect=10.0)
 
     # Прогресс выводим в отдельное заметное текстовое сообщение: подпись под
     # фото-постером слишком мелкая. Постер остаётся видимым во время скачивания.
@@ -696,7 +716,7 @@ async def _download_and_send(
     post_task = asyncio.create_task(_post())
     poll_task = asyncio.create_task(
         _poll_progress(
-            progress_msg, height_label, url, None if height == 0 else height, post_task, codec
+            progress_msg, height_label, url, None if height == 0 else height, post_task, codec, key=key
         )
     )
     try:
