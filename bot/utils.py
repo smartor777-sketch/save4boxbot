@@ -44,8 +44,8 @@ _RUTUBE_RE = re.compile(
 # Coub — https://coub.com/view/{id}
 _COUB_RE = re.compile(r"(?:www\.)?coub\.com/(?:view|embed|video)/([\w\-]+)")
 
-# Dzen — https://dzen.ru/video/watch/{id}
-_DZEN_RE = re.compile(r"dzen\.ru/video/watch/([\w\-]+)")
+# Dzen — /video/watch/{id} и /shorts/{id} (shorts конвертируем в video/watch)
+_DZEN_RE = re.compile(r"dzen\.ru/(?:video/watch|shorts)/([\w\-]+)")
 
 
 def _video_id_from(url: str) -> str | None:
