@@ -48,7 +48,7 @@ async def main():
     await setup_bot_profile(bot)
     await dp.start_polling(
         bot,
-        allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result"],
+        allowed_updates=["message", "callback_query", "inline_query"],
     )
 
 

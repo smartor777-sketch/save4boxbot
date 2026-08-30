@@ -10,13 +10,11 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     BufferedInputFile,
-    ChosenInlineResult,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
-    InlineQueryResultsButton,
     InputMediaPhoto,
     InputMediaVideo,
     InputTextMessageContent,
@@ -408,9 +406,11 @@ START_TEXT = (
 async def start(message: types.Message, command: CommandObject):
     payload = command.args
     if payload and payload not in ("help",):
-        # Deep link из inline mode — подменяем текст и обрабатываем как обычную ссылку
-        message.text = payload
-        await handle_text(message)
+        parsed = extract_video(payload)
+        if parsed:
+            await _process_url(message, payload)
+        else:
+            await message.answer(START_TEXT)
         return
     await message.answer(START_TEXT)
 
@@ -456,19 +456,10 @@ async def stats(message: types.Message):
     await message.answer(text)
 
 
-@router.message(F.text)
-async def handle_text(message: types.Message):
-    if message.edit_date:
-        return
-    parsed = extract_video(message.text)
+async def _process_url(message: types.Message, text: str) -> None:
+    """Обрабатывает ссылку на видео — парсит, получает форматы, показывает кнопки."""
+    parsed = extract_video(text)
     if not parsed:
-        if message.text.startswith("/"):
-            return
-        await message.reply(
-            "ℹ️ Это не похоже на ссылку для скачивания.\n"
-            "Пришли ссылку на видео из YouTube, Instagram, TikTok, "
-            "VK, Rutube, Coub, Яндекс Видео или Dzen."
-        )
         return
     platform, url, key = parsed
     logger.info("Request: platform=%s key=%s url=%s", platform, key, url)
@@ -512,6 +503,23 @@ async def handle_text(message: types.Message):
         return
 
     await status.edit_text(f"🎬 {title}\n\nВыбери качество:", reply_markup=kb)
+
+
+@router.message(F.text)
+async def handle_text(message: types.Message):
+    if message.edit_date:
+        return
+    parsed = extract_video(message.text)
+    if not parsed:
+        if message.text.startswith("/"):
+            return
+        await message.reply(
+            "ℹ️ Это не похоже на ссылку для скачивания.\n"
+            "Пришли ссылку на видео из YouTube, Instagram, TikTok, "
+            "VK, Rutube, Coub, Яндекс Видео или Dzen."
+        )
+        return
+    await _process_url(message, message.text)
 
 
 @router.callback_query(F.data.startswith("fmt:"))
@@ -968,7 +976,7 @@ async def handle_inline(query: InlineQuery):
     result = InlineQueryResultArticle(
         id=key,
         title=f"⬇️ Скачать {platform_label}",
-        description=f"{platform_label} · нажми и получи видео в боте",
+        description=f"{platform_label} · нажми чтобы скачать",
         thumbnail_url="https://img.youtube.com/vi/" + key + "/mqdefault.jpg" if platform == "youtube" else "",
         input_message_content=InputTextMessageContent(
             message_text=f"🎬 {platform_label}\n🔗 {url}",
@@ -978,63 +986,9 @@ async def handle_inline(query: InlineQuery):
         [result],
         cache_time=300,
         is_personal=True,
-        button=InlineQueryResultsButton(
-            text="📥 Скачать видео",
-            start_parameter=key,
-        ),
     )
 
 
-@router.chosen_inline_result()
-async def handle_chosen_inline(result: ChosenInlineResult):
-    """Автоматически скачивает лучший формат при выборе inline-результата."""
-    key = result.result_id
-    url = URLS.get(key)
-    if not url:
-        return
 
-    user_id = result.from_user.id
-    logger.info("INLINE AUTO-DOWNLOAD: key=%s user=%s", key, user_id)
-
-    try:
-        timeout = httpx.Timeout(120.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{config.SERVER_URL}/formats", json={"url": url})
-            body = resp.json()
-    except httpx.HTTPError as e:
-        logger.warning("INLINE AUTO-DOWNLOAD: server error %s", e)
-        return
-
-    if not body.get("ok"):
-        logger.warning("INLINE AUTO-DOWNLOAD: error %s", body.get("error"))
-        return
-
-    formats = body.get("formats", [])
-    available = _allowed(formats)
-    available = _filter_by_height(available)
-    if not available:
-        return
-
-    best = _pick_best(available)
-    if not best:
-        return
-
-    # Отправляем сообщение в ЛС пользователя
-    from aiogram import Bot
-    bot = Bot(token=config.BOT_TOKEN)
-    try:
-        status = await bot.send_message(user_id, "⏳ Скачиваю видео…")
-        await _download_and_send(status, key, best["height"], best.get("codec_key"))
-    except Exception as e:
-        logger.warning("INLINE AUTO-DOWNLOAD: send failed user=%s: %s", user_id, e)
-        try:
-            await bot.send_message(
-                user_id,
-                "⚠️ Не удалось отправить видео. Напиши боту /start и пришли ссылку.",
-            )
-        except Exception:
-            pass
-    finally:
-        await bot.session.close()
 
 
