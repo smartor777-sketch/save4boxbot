@@ -5,15 +5,21 @@ import time
 import httpx
 import logging
 
-from aiogram import F, Router, types
+from aiogram import F, Router, types, Bot
+from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     BufferedInputFile,
+    ChosenInlineResult,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InlineQueryResultsButton,
     InputMediaPhoto,
     InputMediaVideo,
+    InputTextMessageContent,
 )
 from urllib.parse import quote
 
@@ -370,6 +376,26 @@ def _filter_by_height(formats: list[dict], min_h: int = 480) -> list[dict]:
     return [f for f in with_h if f["height"] == max_h]
 
 
+_CODEC_RANK = {"h264": 3, "avc": 3, "avc1": 3, "hevc": 2, "h265": 2, "av01": 1, "vp9": 1}
+
+
+def _pick_best(formats: list[dict]) -> dict | None:
+    """Выбирает лучший формат: H.264 предпочтительнее, далее по разрешению."""
+    if not formats:
+        return None
+    scored = []
+    for f in formats:
+        ck = (f.get("codec_key") or "").lower()
+        rank = 0
+        for k, v in _CODEC_RANK.items():
+            if k in ck:
+                rank = v
+                break
+        scored.append((rank, f.get("height", 0), f))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return scored[0][2]
+
+
 START_TEXT = (
     "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
     "Rutube, Coub, Яндекс Видео и Dzen прямо в Telegram.\n\n"
@@ -378,8 +404,14 @@ START_TEXT = (
 )
 
 
-@router.message(F.text == "/start")
-async def start(message: types.Message):
+@router.message(Command("start"))
+async def start(message: types.Message, command: CommandObject):
+    payload = command.args
+    if payload and payload not in ("help",):
+        # Deep link из inline mode — подменяем текст и обрабатываем как обычную ссылку
+        message.text = payload
+        await handle_text(message)
+        return
     await message.answer(START_TEXT)
 
 
@@ -473,29 +505,6 @@ async def handle_text(message: types.Message):
 
     title = body.get("title", "Видео")
     kb = _build_keyboard(available, key, platform)
-
-    thumb_name = body.get("thumbnail")
-    if thumb_name:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-                r = await client.get(f"{config.SERVER_URL}/file/{quote(thumb_name)}")
-                r.raise_for_status()
-        except httpx.HTTPError as e:
-            logger.warning("Thumb fetch failed thumb=%s: %s", thumb_name, e)
-            r = None
-        if r is not None and r.content and len(r.content) < 5 * 1024 * 1024:
-            poster = BufferedInputFile(r.content, filename=thumb_name)
-            try:
-                await status.answer_photo(poster, caption=f"🎬 {title}", reply_markup=kb)
-            except Exception as e:
-                logger.warning("answer_photo failed for %s: %s", key, e)
-            else:
-                try:
-                    await status.delete()
-                except Exception:
-                    pass
-                return
-    logger.info("No poster for key=%s (thumb=%s): fallback to text flow", key, thumb_name)
 
     if len(available) == 1:
         f = available[0]
@@ -910,3 +919,122 @@ async def cancel(callback: types.CallbackQuery):
         await callback.message.delete()
     except Exception:
         await callback.message.edit_text("❌ Отменено")
+
+
+# ─── Inline mode ────────────────────────────────────────────────────────
+
+_INLINE_SUPPORTED = {"youtube", "tiktok", "instagram", "vk", "rutube", "coub", "yandex", "dzen"}
+
+
+@router.inline_query()
+async def handle_inline(query: InlineQuery):
+    """Обрабатывает @bot <ссылка> — мгновенный ответ без серверного запроса.
+
+    Telegram даёт 5 секунд на ответ inline-запроса. Извлечение форматов
+    через /formats занимает 10+ сек (YouTube extractor), поэтому отвечаем
+    сразу текстом. При клике бот отправит ЛС с форматами.
+    """
+    text = query.query.strip()
+    if not text:
+        await query.answer([], cache_time=10, is_personal=True)
+        return
+
+    try:
+        parsed = extract_video(text)
+    except Exception:
+        await query.answer([], cache_time=5, is_personal=True)
+        return
+
+    if not parsed:
+        await query.answer(
+            [],
+            cache_time=5,
+            is_personal=True,
+            switch_pm_text="Пришли ссылку на видео",
+            switch_pm_parameter="help",
+        )
+        return
+
+    platform, url, key = parsed
+    if platform not in _INLINE_SUPPORTED:
+        await query.answer([], cache_time=5, is_personal=True)
+        return
+
+    # Сохраняем URL для callback-кнопок
+    URLS[key] = url
+
+    platform_label = platform.upper() if platform != "coub" else "Coub"
+
+    result = InlineQueryResultArticle(
+        id=key,
+        title=f"⬇️ Скачать {platform_label}",
+        description=f"{platform_label} · нажми и получи видео в боте",
+        thumbnail_url="https://img.youtube.com/vi/" + key + "/mqdefault.jpg" if platform == "youtube" else "",
+        input_message_content=InputTextMessageContent(
+            message_text=f"🎬 {platform_label}\n🔗 {url}",
+        ),
+    )
+    await query.answer(
+        [result],
+        cache_time=300,
+        is_personal=True,
+        button=InlineQueryResultsButton(
+            text="📥 Скачать видео",
+            start_parameter=key,
+        ),
+    )
+
+
+@router.chosen_inline_result()
+async def handle_chosen_inline(result: ChosenInlineResult):
+    """Автоматически скачивает лучший формат при выборе inline-результата."""
+    key = result.result_id
+    url = URLS.get(key)
+    if not url:
+        return
+
+    user_id = result.from_user.id
+    logger.info("INLINE AUTO-DOWNLOAD: key=%s user=%s", key, user_id)
+
+    try:
+        timeout = httpx.Timeout(120.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{config.SERVER_URL}/formats", json={"url": url})
+            body = resp.json()
+    except httpx.HTTPError as e:
+        logger.warning("INLINE AUTO-DOWNLOAD: server error %s", e)
+        return
+
+    if not body.get("ok"):
+        logger.warning("INLINE AUTO-DOWNLOAD: error %s", body.get("error"))
+        return
+
+    formats = body.get("formats", [])
+    available = _allowed(formats)
+    available = _filter_by_height(available)
+    if not available:
+        return
+
+    best = _pick_best(available)
+    if not best:
+        return
+
+    # Отправляем сообщение в ЛС пользователя
+    from aiogram import Bot
+    bot = Bot(token=config.BOT_TOKEN)
+    try:
+        status = await bot.send_message(user_id, "⏳ Скачиваю видео…")
+        await _download_and_send(status, key, best["height"], best.get("codec_key"))
+    except Exception as e:
+        logger.warning("INLINE AUTO-DOWNLOAD: send failed user=%s: %s", user_id, e)
+        try:
+            await bot.send_message(
+                user_id,
+                "⚠️ Не удалось отправить видео. Напиши боту /start и пришли ссылку.",
+            )
+        except Exception:
+            pass
+    finally:
+        await bot.session.close()
+
+
