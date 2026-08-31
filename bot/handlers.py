@@ -511,6 +511,9 @@ async def handle_text(message: types.Message):
         return
     parsed = extract_video(message.text)
     if not parsed:
+        # В группах игнорируем сообщения без ссылок (не спамим)
+        if message.chat.type != "private" and not message.text.startswith("/"):
+            return
         if message.text.startswith("/"):
             return
         await message.reply(
