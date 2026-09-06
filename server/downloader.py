@@ -364,33 +364,34 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
                     v.pause();
                     v.muted = true;
                     v.currentTime = 0;
-                    if (i > 0) v.closest('div') && (v.closest('div').style.display = 'none');
+                    if (i > 0) {
+                        v.style.cssText = 'visibility:hidden !important; width:0 !important; height:0 !important; position:absolute !important; pointer-events:none !important;';
+                    }
                 });
                 return vids.length;
             }""")
             print(f"Playwright: found {n} video elements")
 
             if n > 1:
-                # Последовательное воспроизведение каждого видео
                 for i in range(n):
                     print(f"Playwright: playing video {i+1}/{n}")
-                    # Показываем текущее видео
                     page.evaluate(f"""() => {{
                         const vids = document.querySelectorAll('video');
-                        // Скрыть все, показать i-е
+                        // Скрыть все
                         vids.forEach((v, j) => {{
-                            const wrap = v.closest('div');
-                            if (wrap) wrap.style.display = j === {i} ? '' : 'none';
-                            if (j === {i}) {{
-                                v.muted = true;
-                                v.currentTime = 0;
-                                v.play().catch(() => {{}});
+                            if (j !== {i}) {{
+                                v.style.cssText = 'visibility:hidden !important; width:0 !important; height:0 !important; position:absolute !important; pointer-events:none !important;';
+                                v.pause();
                             }}
                         }});
+                        // Показать и воспроизвести текущее
+                        const cur = vids[{i}];
+                        cur.style.cssText = '';
+                        cur.muted = true;
+                        cur.currentTime = 0;
+                        cur.play().catch(() => {{}});
                     }}""")
-                    # Ждём пока видео воспроизведётся (до 60 сек)
                     page.wait_for_timeout(15000)
-                    # Останавливаем текущее
                     page.evaluate(f"""() => {{
                         const vids = document.querySelectorAll('video');
                         if (vids[{i}]) vids[{i}].pause();

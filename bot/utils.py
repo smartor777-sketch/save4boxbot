@@ -92,18 +92,18 @@ def extract_instagram_url(text: str) -> tuple[str, str] | None:
     if "instagram.com" not in raw:
         return None
 
+    # Highlights: /stories/highlights/{id} — проверяем ПЕРЕД story
+    hl_m = _INSTAGRAM_HIGHLIGHT_RE.search(raw)
+    if hl_m:
+        hl_id = hl_m.group(1)
+        return raw, f"hl_{hl_id}"
+
     # Stories: /stories/{username}/{story_id} — возвращаем оригинальный URL
     story_m = _INSTAGRAM_STORY_RE.search(raw)
     if story_m:
         username = story_m.group(1)
         story_id = story_m.group(2)
         return raw, f"story_{username}_{story_id}"
-
-    # Highlights: /stories/highlights/{id} — возвращаем оригинальный URL
-    hl_m = _INSTAGRAM_HIGHLIGHT_RE.search(raw)
-    if hl_m:
-        hl_id = hl_m.group(1)
-        return raw, f"hl_{hl_id}"
 
     m = _INSTAGRAM_RE.search(raw)
     if not m:
