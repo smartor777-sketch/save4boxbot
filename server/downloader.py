@@ -490,6 +490,17 @@ def list_formats(url: str) -> dict:
             with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                 info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
+            if not story:
+                return {
+                    "ok": True,
+                    "platform": "instagram",
+                    "title": "Instagram видео",
+                    "duration_sec": None,
+                    "media_count": 1,
+                    "media": [{"index": 0, "kind": "video"}],
+                    "is_carousel": False,
+                    "use_playwright": True,
+                }
             return {"error": f"Не удалось получить информацию: {e}"}
 
         entries = info.get("entries")
