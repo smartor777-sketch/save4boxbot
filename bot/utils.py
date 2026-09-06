@@ -12,9 +12,12 @@ _PATH_RE = re.compile(r"(?:www\.|m\.)?youtube\.com/v/([\w\-]+)")
 _WATCH_RE = re.compile(r"[?&]v=([\w\-]+)")
 _YOUTU_RE = re.compile(r"youtu\.be/([\w\-]+)")
 
-# Instagram ссылки (пост / рилс / видео)
+# Instagram ссылки (пост / рилс / видео / stories)
 _INSTAGRAM_RE = re.compile(
-    r"(?:www\.)?instagram\.com/(?:p|reel|reels|tv|stories)/([\w\-]+)"
+    r"(?:www\.)?instagram\.com/(?:p|reel|reels|tv)/([\w\-]+)"
+)
+_INSTAGRAM_STORY_RE = re.compile(
+    r"(?:www\.)?instagram\.com/stories/([\w\-]+)/(\d+)"
 )
 
 # TikTok ссылки
@@ -85,6 +88,14 @@ def extract_instagram_url(text: str) -> tuple[str, str] | None:
     raw = raw_match.group(0).rstrip(".,!?)")
     if "instagram.com" not in raw:
         return None
+
+    # Stories: /stories/{username}/{story_id} — возвращаем оригинальный URL
+    story_m = _INSTAGRAM_STORY_RE.search(raw)
+    if story_m:
+        username = story_m.group(1)
+        story_id = story_m.group(2)
+        return raw, f"story_{username}_{story_id}"
+
     m = _INSTAGRAM_RE.search(raw)
     if not m:
         return None
