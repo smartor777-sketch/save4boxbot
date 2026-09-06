@@ -262,15 +262,20 @@ def _tiktok_opts(output_template: str, http_chunk_size: int | None = None) -> di
     return opts
 
 
-def _instagram_opts(output_template: str) -> dict:
+_INSTAGRAM_STORY_RE = re.compile(r"instagram\.com/stories/([^/]+)/(\d+)")
+
+def _is_instagram_story(url: str) -> bool:
+    return bool(_INSTAGRAM_STORY_RE.search(url))
+
+
+def _instagram_opts(output_template: str, *, is_story: bool = False) -> dict:
     """Опции для Instagram: фото-посты не должны ронять экстракцию.
-    noplaylist=False нужен для stories (плейлисты).
-    Cookies нужны для stories — без них Instagram возвращает 429/unreachable."""
+    is_story=True — stories (плейлисты, нужен noplaylist=False)."""
     opts = _base_opts(output_template)
     opts["ignore_no_formats_error"] = True
-    opts["noplaylist"] = False  # Stories — плейлисты, нужен доступ к entries
+    opts["noplaylist"] = not is_story  # Stories — плейлисты, noplaylist=False
     cookie_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
-    if os.path.isfile(cookie_path):
+    if os.path.isfile(cookie_path) and is_story:
         opts["cookiefile"] = cookie_path
     return opts
 
@@ -377,8 +382,9 @@ def list_formats(url: str) -> dict:
         return {"error": "Ссылка не поддерживается (YouTube / TikTok / Instagram / VK / Rutube / Coub / Яндекс Видео / Dzen)"}
 
     if platform == "instagram":
+        story = _is_instagram_story(url)
         try:
-            with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
+            with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                 info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
             return {"error": f"Не удалось получить информацию: {e}"}
@@ -610,8 +616,9 @@ def _do_download_instagram(
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
+            story = _is_instagram_story(url)
             try:
-                with yt_dlp.YoutubeDL(_instagram_opts("")) as ydl:
+                with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                     meta = _extract_info_with_retry(ydl, url, download=False)
             except Exception as e:
                 return {"error": f"Не удалось получить информацию: {e}"}
@@ -636,7 +643,8 @@ def _do_download_instagram(
             for idx, entry in enumerate(items, start=1):
                 fmt_sel = _instagram_entry_format(entry)
                 opts = _instagram_opts(
-                    os.path.join(tmp_dir, f"%(title).100B [%(id)s]_{idx}.%(ext)s")
+                    os.path.join(tmp_dir, f"%(title).100B [%(id)s]_{idx}.%(ext)s"),
+                    is_story=story,
                 )
                 opts["format"] = fmt_sel
                 opts["playlist_items"] = str(idx)
