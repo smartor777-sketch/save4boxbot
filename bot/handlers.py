@@ -680,7 +680,7 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
                 await msg.answer_video(bf, caption=caption, supports_streaming=True)
             else:
                 await msg.answer_photo(bf, caption=caption)
-        else:
+        elif len(media_items) <= 10:
             group = []
             for i, (kind, bf) in enumerate(media_items):
                 cap = caption if i == 0 else None
@@ -688,8 +688,15 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
                     group.append(InputMediaVideo(media=bf, caption=cap))
                 else:
                     group.append(InputMediaPhoto(media=bf, caption=cap))
-            for start in range(0, len(group), 10):
-                await msg.answer_media_group(group[start : start + 10])
+            await msg.answer_media_group(group)
+        else:
+            for i, (kind, bf) in enumerate(media_items):
+                cap = caption if i == 0 else None
+                if kind == "video":
+                    await msg.answer_video(bf, caption=cap, supports_streaming=True)
+                else:
+                    await msg.answer_photo(bf, caption=cap)
+                await asyncio.sleep(0.5)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Не удалось отправить: {e}")

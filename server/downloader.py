@@ -266,10 +266,10 @@ _INSTAGRAM_STORY_RE = re.compile(r"instagram\.com/stories/([^/]+)/(\d+)")
 _INSTAGRAM_HIGHLIGHT_RE = re.compile(r"instagram\.com/stories/highlights/(\d+)")
 
 def _is_instagram_story(url: str) -> bool:
-    """Stories, но НЕ highlights (highlights — через Playwright)."""
-    if _INSTAGRAM_HIGHLIGHT_RE.search(url):
-        return False
-    return bool(_INSTAGRAM_STORY_RE.search(url))
+    """Stories и highlights — плейлисты, нужен noplaylist=False."""
+    if _INSTAGRAM_STORY_RE.search(url) or _INSTAGRAM_HIGHLIGHT_RE.search(url):
+        return True
+    return False
 
 
 def _instagram_opts(output_template: str, *, is_story: bool = False) -> dict:
@@ -291,167 +291,6 @@ def _instagram_entry_format(entry: dict) -> str:
         return "best"
     return "img-best/best"
 
-
-INSTAGRAM_PLAYWRIGHT_VENV = os.getenv("INSTAGRAM_PLAYWRIGHT_VENV", "/opt/pw-venv")
-INSTAGRAM_COOKIES_PATH = os.getenv("INSTAGRAM_COOKIES_PATH", "")
-
-
-def _load_instagram_cookies() -> list[dict]:
-    """Загружает cookies из cookies.txt (Netscape format) для Playwright."""
-    cookie_path = INSTAGRAM_COOKIES_PATH
-    if not cookie_path:
-        cookie_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
-    if not os.path.isfile(cookie_path):
-        return []
-    cookies = []
-    with open(cookie_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("#") or not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                cookies.append({
-                    "name": parts[5],
-                    "value": parts[6],
-                    "domain": parts[0],
-                    "path": parts[2],
-                    "secure": parts[3].upper() == "TRUE",
-                })
-    return cookies
-
-
-def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
-    """Скачивает Instagram highlights/post/reel через Playwright.
-    Перехватывает оригинальные CDN URL видео, скачивает каждое, конвертирует в MP4."""
-    import sys as _sys
-    import subprocess
-    import urllib.request
-    venv_site = os.path.join(INSTAGRAM_PLAYWRIGHT_VENV, "lib", "python3.13", "site-packages")
-    if os.path.isdir(venv_site):
-        _sys.path.insert(0, venv_site)
-
-    from playwright.sync_api import sync_playwright
-
-    cookies = _load_instagram_cookies()
-    results = []
-
-    rec_dir = os.path.join(tmp_dir, "rec")
-    os.makedirs(rec_dir, exist_ok=True)
-
-    print(f"Playwright: starting for {url}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            record_video_dir=rec_dir,
-            record_video_size={"width": 1080, "height": 1920},
-        )
-        if cookies:
-            context.add_cookies(cookies)
-
-        page = context.new_page()
-
-        # Перехватываем ВСЕ видео URL с CDN
-        video_urls = {}  # key=(base_url), value=list of (url, content_length)
-        def _on_response(response):
-            ct = response.headers.get("content-type", "")
-            resp_url = response.url
-            cl = int(response.headers.get("content-length", "0") or "0")
-            if "cdninstagram" in resp_url and ("video" in ct or ".mp4" in resp_url or cl > 50000):
-                # Группируем по base path (убираем range params)
-                base = re.sub(r"[?&](bytestart|byteend|bytefst|bytelen|playlist)=[^&]*", "", resp_url)
-                if base not in video_urls:
-                    video_urls[base] = []
-                video_urls[base].append((resp_url, cl))
-
-        page.on("response", _on_response)
-
-        try:
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(15000)
-        except Exception as e:
-            print(f"Playwright: page error {e}")
-
-        context.close()
-        browser.close()
-
-    print(f"Playwright: captured {len(video_urls)} video URL groups")
-
-    if not video_urls:
-        # Fallback: recording
-        return _fallback_recording(rec_dir, tmp_dir)
-
-    # Для каждой группы CDN URL — скачиваем最大的 video
-    idx = 0
-    for base, url_list in video_urls.items():
-        # Берём URL с самым большим content-length
-        best_url, best_cl = max(url_list, key=lambda x: x[1])
-        if best_cl < 10000:
-            continue
-        print(f"Playwright: downloading video {idx} ({best_cl} bytes)")
-        mp4_path = os.path.join(tmp_dir, f"ig_video_{idx}.mp4")
-        try:
-            req = urllib.request.Request(best_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            resp = urllib.request.urlopen(req, timeout=60)
-            data = resp.read()
-            with open(mp4_path, "wb") as f:
-                f.write(data)
-            mp4_size = os.path.getsize(mp4_path)
-            if mp4_size > 1024:
-                results.append({"path": mp4_path, "kind": "video", "size": mp4_size})
-                idx += 1
-        except Exception as e:
-            print(f"Playwright: download error {e}")
-            continue
-
-    if results:
-        return results
-
-    return _fallback_recording(rec_dir, tmp_dir)
-
-
-def _fallback_recording(rec_dir: str, tmp_dir: str) -> list[dict]:
-    """Fallback: конвертируем записанный WebM → MP4."""
-    import subprocess
-    results = []
-    webm_files = [f for f in os.listdir(rec_dir) if f.endswith(".webm")]
-    if not webm_files:
-        return results
-
-    webm_path = os.path.join(rec_dir, webm_files[0])
-    if not os.path.isfile(webm_path):
-        return results
-
-    webm_size = os.path.getsize(webm_path)
-    print(f"Playwright fallback: webm size={webm_size}")
-    if webm_size < 1024:
-        return results
-
-    mp4_path = os.path.join(tmp_dir, "ig_video.mp4")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", webm_path, "-c:v", "libx264", "-preset", "ultrafast",
-             "-crf", "28", "-y", mp4_path],
-            timeout=120, capture_output=True,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"Playwright fallback: ffmpeg error {e}")
-        return results
-
-    if not os.path.isfile(mp4_path):
-        return results
-
-    mp4_size = os.path.getsize(mp4_path)
-    if mp4_size < 1024:
-        return results
-
-    results.append({"path": mp4_path, "kind": "video", "size": mp4_size})
-    return results
 
 
 def _first_downloaded_path(info: dict) -> str | None:
@@ -553,17 +392,6 @@ def list_formats(url: str) -> dict:
             with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                 info = _extract_info_with_retry(ydl, url, download=False)
         except Exception as e:
-            if not story:
-                return {
-                    "ok": True,
-                    "platform": "instagram",
-                    "title": "Instagram видео",
-                    "duration_sec": None,
-                    "media_count": 1,
-                    "media": [{"index": 0, "kind": "video"}],
-                    "is_carousel": False,
-                    "use_playwright": True,
-                }
             return {"error": f"Не удалось получить информацию: {e}"}
 
         entries = info.get("entries")
@@ -798,9 +626,6 @@ def _do_download_instagram(
                 with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                     meta = _extract_info_with_retry(ydl, url, download=False)
             except Exception as e:
-                if not story:
-                    # Posts/reels: пробуем Playwright fallback
-                    return _do_download_instagram_playwright(url, tmp, task_key)
                 return {"error": f"Не удалось получить информацию: {e}"}
 
             entries = meta.get("entries") or []
@@ -873,49 +698,6 @@ def _do_download_instagram(
         if task_key is not None:
             _unregister_progress(task_key)
 
-
-def _do_download_instagram_playwright(
-    url: str, tmp: str, task_key: tuple[str, int | None, str | None] | None = None
-) -> dict:
-    """Fallback для Instagram posts/reels через Playwright."""
-    if task_key is not None:
-        _register_progress(task_key, status="extracting", started_at=time.time())
-
-    try:
-        tmp_dir = os.path.join(tmp, "pw_dl")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        pw_results = _download_instagram_via_playwright(url, tmp_dir)
-        if not pw_results:
-            return {"error": "Не удалось скачать видео (Playwright)"}
-
-        results = []
-        for item in pw_results:
-            src = item["path"]
-            if not os.path.exists(src):
-                continue
-            target = os.path.join(DOWNLOAD_DIR, os.path.basename(src))
-            shutil.move(src, target)
-            ext = os.path.splitext(target)[1].lower()
-            kind = "image" if ext in INSTAGRAM_IMAGE_EXTS else "video"
-            clean = _clean_instagram_name(os.path.basename(target), kind)
-            if clean != os.path.basename(target):
-                clean_target = os.path.join(DOWNLOAD_DIR, clean)
-                os.rename(target, clean_target)
-                target = clean_target
-            results.append({"filename": os.path.basename(target), "kind": kind})
-
-        if not results:
-            return {"error": "Файл не был создан (Playwright)"}
-
-        return {
-            "ok": True,
-            "title": "Instagram видео",
-            "files": results,
-        }
-    finally:
-        if task_key is not None:
-            _unregister_progress(task_key)
 
 
 def _fmt_selector(platform: str, height: int | None, codec: str | None = None) -> tuple[str, str]:
