@@ -61,6 +61,9 @@ def formats(req: FormatsRequest):
         "duration_sec": result.get("duration_sec"),
         "formats": result.get("formats", []),
         "thumbnail": result.get("thumbnail"),
+        "media_count": result.get("media_count"),
+        "media": result.get("media"),
+        "is_carousel": result.get("is_carousel"),
     }
 
 

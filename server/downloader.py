@@ -263,9 +263,15 @@ def _tiktok_opts(output_template: str, http_chunk_size: int | None = None) -> di
 
 
 def _instagram_opts(output_template: str) -> dict:
-    """Опции для Instagram: фото-посты не должны ронять экстракцию."""
+    """Опции для Instagram: фото-посты не должны ронять экстракцию.
+    noplaylist=False нужен для stories (плейлисты).
+    Cookies нужны для stories — без них Instagram возвращает 429/unreachable."""
     opts = _base_opts(output_template)
     opts["ignore_no_formats_error"] = True
+    opts["noplaylist"] = False  # Stories — плейлисты, нужен доступ к entries
+    cookie_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+    if os.path.isfile(cookie_path):
+        opts["cookiefile"] = cookie_path
     return opts
 
 
@@ -378,12 +384,17 @@ def list_formats(url: str) -> dict:
             return {"error": f"Не удалось получить информацию: {e}"}
 
         entries = info.get("entries")
-        if entries:
+        # Stories: yt-dlp возвращает плейлист (n_entries/playlist_count), но entries
+        # может быть генератором или отсутствовать. Обрабатываем оба случая.
+        n_entries = info.get("n_entries") or info.get("playlist_count")
+        if entries or n_entries:
+            if entries and not isinstance(entries, list):
+                entries = list(entries)
             media = [
                 {"index": i, "kind": _media_kind(e)}
-                for i, e in enumerate(entries)
+                for i, e in enumerate(entries or [])
                 if e
-            ]
+            ] if entries else [{"index": i, "kind": "video"} for i in range(n_entries or 0)]
         else:
             media = [{"index": 0, "kind": _media_kind(info)}]
 
@@ -397,7 +408,7 @@ def list_formats(url: str) -> dict:
             "duration_sec": info.get("duration"),
             "media_count": len(media),
             "media": media,
-            "is_carousel": bool(entries),
+            "is_carousel": bool(entries) or bool(n_entries),
         }
 
     if platform == "tiktok":
@@ -606,7 +617,15 @@ def _do_download_instagram(
                 return {"error": f"Не удалось получить информацию: {e}"}
 
             entries = meta.get("entries") or []
-            items = [e for e in entries if e] if entries else [meta]
+            # Stories: entries может быть генератором или пустым, но n_entries > 0
+            n_entries = meta.get("n_entries") or meta.get("playlist_count")
+            if entries:
+                items = [e for e in entries if e]
+            elif n_entries:
+                # Stories — плейлист без entries в metadata, скачиваем по playlist_items
+                items = [{"index": i} for i in range(1, n_entries + 1)]
+            else:
+                items = [meta]
             if not items:
                 return {"error": "Файл не был создан"}
 
@@ -627,10 +646,10 @@ def _do_download_instagram(
                         info = _extract_info_with_retry(ydl, url, download=True)
                 except DownloadTimeoutError as e:
                     return {"error": str(e)}
-                except FileTooBigError as e:
-                    return {"error": str(e)}
+                except FileTooBigError:
+                    continue  # Слишком большой файл — пропускаем (stories/carousel)
                 except Exception as e:
-                    return {"error": f"Не удалось скачать: {e}"}
+                    continue  # Ошибка скачивания — пропускаем
 
                 src = _first_downloaded_path(info)
                 if not src or not os.path.exists(src):
@@ -650,13 +669,9 @@ def _do_download_instagram(
             total = sum(
                 os.path.getsize(os.path.join(DOWNLOAD_DIR, r["filename"])) for r in results
             )
-            if total > MAX_FILESIZE_BYTES:
-                return {
-                    "error": (
-                        f"Пост слишком большой ({total / 1024 / 1024:.0f} МБ), "
-                        f"лимит {MAX_FILESIZE_BYTES / 1024 / 1024:.0f} МБ"
-                    )
-                }
+
+            if not results:
+                return {"error": "Файл не был создан (все файлы пропущены — слишком большие)"}
 
             username = meta.get("channel") or meta.get("uploader")
             title = _instagram_title(username, {r["kind"] for r in results})
