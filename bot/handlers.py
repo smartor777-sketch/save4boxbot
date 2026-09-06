@@ -151,6 +151,7 @@ URLS: dict[str, str] = {}
 
 # скачивания в процессе («конкурентный двойной клик» по одной кнопке)
 _IN_FLIGHT: set[str] = set()
+_batch_wait: dict[str, asyncio.Event] = {}
 
 
 def _size_label(size):
@@ -597,6 +598,18 @@ async def handle_instagram_post(callback: types.CallbackQuery):
         _IN_FLIGHT.discard(marker)
 
 
+@router.callback_query(F.data.startswith("ig_batch:"))
+async def handle_ig_batch(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    key = parts[1]
+    sent = int(parts[2])
+    evt = _batch_wait.get(f"{key}:{sent}")
+    if evt:
+        evt.set()
+    await callback.message.edit_text(f"⏳ Отправляю следующие…")
+
+
 async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
     url = URLS.get(key)
     if not url:
@@ -673,30 +686,56 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
             await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
             return
 
-    try:
-        if len(media_items) == 1:
-            kind, bf = media_items[0]
+    BATCH_SIZE = 10
+
+    async def _send_batch(items: list, cap: str | None = None) -> None:
+        if len(items) == 1:
+            kind, bf = items[0]
             if kind == "video":
-                await msg.answer_video(bf, caption=caption, supports_streaming=True)
+                await msg.answer_video(bf, caption=cap, supports_streaming=True)
             else:
-                await msg.answer_photo(bf, caption=caption)
-        elif len(media_items) <= 10:
-            group = []
-            for i, (kind, bf) in enumerate(media_items):
-                cap = caption if i == 0 else None
-                if kind == "video":
-                    group.append(InputMediaVideo(media=bf, caption=cap))
-                else:
-                    group.append(InputMediaPhoto(media=bf, caption=cap))
-            await msg.answer_media_group(group)
+                await msg.answer_photo(bf, caption=cap)
         else:
-            for i, (kind, bf) in enumerate(media_items):
-                cap = caption if i == 0 else None
+            group = []
+            for i, (kind, bf) in enumerate(items):
                 if kind == "video":
-                    await msg.answer_video(bf, caption=cap, supports_streaming=True)
+                    group.append(InputMediaVideo(media=bf, caption=cap if i == 0 else None))
                 else:
-                    await msg.answer_photo(bf, caption=cap)
-                await asyncio.sleep(0.5)
+                    group.append(InputMediaPhoto(media=bf, caption=cap if i == 0 else None))
+            await msg.answer_media_group(group)
+
+    try:
+        total = len(media_items)
+        if total <= BATCH_SIZE:
+            await _send_batch(media_items, caption)
+        else:
+            # Первая порция
+            await _send_batch(media_items[:BATCH_SIZE], caption)
+            sent = BATCH_SIZE
+            while sent < total:
+                remaining = total - sent
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text=f"📥 Отправить ещё {min(BATCH_SIZE, remaining)} из {total}",
+                        callback_data=f"ig_batch:{key}:{sent}"
+                    )]
+                ])
+                status = await msg.answer(
+                    f"✅ Отправлено {sent} из {total}",
+                    reply_markup=kb
+                )
+                # Ждём нажатия (60 сек) или пропускаем
+                try:
+                    await asyncio.wait_for(
+                        _batch_wait.get(f"{key}:{sent}", asyncio.Event()).wait(),
+                        timeout=60
+                    )
+                    _batch_wait.pop(f"{key}:{sent}", None)
+                except (asyncio.TimeoutError, KeyError):
+                    await status.edit_text(f"⏰ Отменено. Отправлено {sent} из {total}")
+                    break
+                await _send_batch(media_items[sent:sent + BATCH_SIZE])
+                sent += BATCH_SIZE
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Не удалось отправить: {e}")
