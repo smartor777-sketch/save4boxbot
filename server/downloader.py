@@ -263,8 +263,12 @@ def _tiktok_opts(output_template: str, http_chunk_size: int | None = None) -> di
 
 
 _INSTAGRAM_STORY_RE = re.compile(r"instagram\.com/stories/([^/]+)/(\d+)")
+_INSTAGRAM_HIGHLIGHT_RE = re.compile(r"instagram\.com/stories/highlights/(\d+)")
 
 def _is_instagram_story(url: str) -> bool:
+    """Stories, но НЕ highlights (highlights — через Playwright)."""
+    if _INSTAGRAM_HIGHLIGHT_RE.search(url):
+        return False
     return bool(_INSTAGRAM_STORY_RE.search(url))
 
 
@@ -318,8 +322,8 @@ def _load_instagram_cookies() -> list[dict]:
 
 
 def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
-    """Скачивает Instagram post/reel через Playwright recording approach.
-    Записывает экран пока видео воспроизводится, конвертирует WebM -> MP4."""
+    """Скачивает Instagram post/reel через Playwright recording.
+    Для carousel — воспроизводит видео ПОСЛЕДОВАТЕЛЬНО (каждое по очереди)."""
     import sys as _sys
     import subprocess
     venv_site = os.path.join(INSTAGRAM_PLAYWRIGHT_VENV, "lib", "python3.13", "site-packages")
@@ -334,8 +338,10 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
     rec_dir = os.path.join(tmp_dir, "rec")
     os.makedirs(rec_dir, exist_ok=True)
 
+    print(f"Playwright: starting recording for {url}")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -349,15 +355,64 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
 
         try:
             page.goto(url, timeout=30000)
-            page.wait_for_timeout(12000)
-        except Exception:
-            pass
+            page.wait_for_timeout(3000)
+
+            # Паузаем все видео, скрываем кроме первого
+            n = page.evaluate("""() => {
+                const vids = document.querySelectorAll('video');
+                vids.forEach((v, i) => {
+                    v.pause();
+                    v.muted = true;
+                    v.currentTime = 0;
+                    if (i > 0) v.closest('div') && (v.closest('div').style.display = 'none');
+                });
+                return vids.length;
+            }""")
+            print(f"Playwright: found {n} video elements")
+
+            if n > 1:
+                # Последовательное воспроизведение каждого видео
+                for i in range(n):
+                    print(f"Playwright: playing video {i+1}/{n}")
+                    # Показываем текущее видео
+                    page.evaluate(f"""() => {{
+                        const vids = document.querySelectorAll('video');
+                        // Скрыть все, показать i-е
+                        vids.forEach((v, j) => {{
+                            const wrap = v.closest('div');
+                            if (wrap) wrap.style.display = j === {i} ? '' : 'none';
+                            if (j === {i}) {{
+                                v.muted = true;
+                                v.currentTime = 0;
+                                v.play().catch(() => {{}});
+                            }}
+                        }});
+                    }}""")
+                    # Ждём пока видео воспроизведётся (до 60 сек)
+                    page.wait_for_timeout(15000)
+                    # Останавливаем текущее
+                    page.evaluate(f"""() => {{
+                        const vids = document.querySelectorAll('video');
+                        if (vids[{i}]) vids[{i}].pause();
+                    }}""")
+                    page.wait_for_timeout(500)
+            else:
+                # Одно видео — просто играем
+                page.evaluate("""() => {
+                    const v = document.querySelector('video');
+                    if (v) { v.muted = true; v.currentTime = 0; v.play().catch(() => {}); }
+                }""")
+                page.wait_for_timeout(12000)
+
+        except Exception as e:
+            print(f"Playwright: page error {e}")
 
         context.close()
         browser.close()
 
     # Найти записанный WebM файл
     webm_files = [f for f in os.listdir(rec_dir) if f.endswith(".webm")]
+    print(f"Playwright: found {len(webm_files)} webm files in {rec_dir}")
     if not webm_files:
         return results
 
@@ -366,18 +421,21 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
         return results
 
     webm_size = os.path.getsize(webm_path)
+    print(f"Playwright: webm size={webm_size}")
     if webm_size < 1024:
         return results
 
     # Конвертируем WebM -> MP4 через ffmpeg
     mp4_path = os.path.join(tmp_dir, "ig_video.mp4")
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-i", webm_path, "-c:v", "libx264", "-preset", "ultrafast",
              "-crf", "28", "-y", mp4_path],
             timeout=120, capture_output=True,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        print(f"Playwright: ffmpeg rc={r.returncode}, mp4 exists={os.path.isfile(mp4_path)}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"Playwright: ffmpeg error {e}")
         return results
 
     if not os.path.isfile(mp4_path):
