@@ -322,10 +322,11 @@ def _load_instagram_cookies() -> list[dict]:
 
 
 def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
-    """Скачивает Instagram post/reel через Playwright recording.
-    Для carousel — воспроизводит видео ПОСЛЕДОВАТЕЛЬНО (каждое по очереди)."""
+    """Скачивает Instagram highlights/post/reel через Playwright.
+    Перехватывает оригинальные CDN URL видео, скачивает каждое, конвертирует в MP4."""
     import sys as _sys
     import subprocess
+    import urllib.request
     venv_site = os.path.join(INSTAGRAM_PLAYWRIGHT_VENV, "lib", "python3.13", "site-packages")
     if os.path.isdir(venv_site):
         _sys.path.insert(0, venv_site)
@@ -338,7 +339,7 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
     rec_dir = os.path.join(tmp_dir, "rec")
     os.makedirs(rec_dir, exist_ok=True)
 
-    print(f"Playwright: starting recording for {url}")
+    print(f"Playwright: starting for {url}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
@@ -353,67 +354,72 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
 
         page = context.new_page()
 
+        # Перехватываем ВСЕ видео URL с CDN
+        video_urls = {}  # key=(base_url), value=list of (url, content_length)
+        def _on_response(response):
+            ct = response.headers.get("content-type", "")
+            resp_url = response.url
+            cl = int(response.headers.get("content-length", "0") or "0")
+            if "cdninstagram" in resp_url and ("video" in ct or ".mp4" in resp_url or cl > 50000):
+                # Группируем по base path (убираем range params)
+                base = re.sub(r"[?&](bytestart|byteend|bytefst|bytelen|playlist)=[^&]*", "", resp_url)
+                if base not in video_urls:
+                    video_urls[base] = []
+                video_urls[base].append((resp_url, cl))
+
+        page.on("response", _on_response)
+
         try:
             page.goto(url, timeout=30000)
-            page.wait_for_timeout(3000)
-
-            # Паузаем все видео, скрываем кроме первого
-            n = page.evaluate("""() => {
-                const vids = document.querySelectorAll('video');
-                vids.forEach((v, i) => {
-                    v.pause();
-                    v.muted = true;
-                    v.currentTime = 0;
-                    if (i > 0) {
-                        v.style.cssText = 'visibility:hidden !important; width:0 !important; height:0 !important; position:absolute !important; pointer-events:none !important;';
-                    }
-                });
-                return vids.length;
-            }""")
-            print(f"Playwright: found {n} video elements")
-
-            if n > 1:
-                for i in range(n):
-                    print(f"Playwright: playing video {i+1}/{n}")
-                    page.evaluate(f"""() => {{
-                        const vids = document.querySelectorAll('video');
-                        // Скрыть все
-                        vids.forEach((v, j) => {{
-                            if (j !== {i}) {{
-                                v.style.cssText = 'visibility:hidden !important; width:0 !important; height:0 !important; position:absolute !important; pointer-events:none !important;';
-                                v.pause();
-                            }}
-                        }});
-                        // Показать и воспроизвести текущее
-                        const cur = vids[{i}];
-                        cur.style.cssText = '';
-                        cur.muted = true;
-                        cur.currentTime = 0;
-                        cur.play().catch(() => {{}});
-                    }}""")
-                    page.wait_for_timeout(15000)
-                    page.evaluate(f"""() => {{
-                        const vids = document.querySelectorAll('video');
-                        if (vids[{i}]) vids[{i}].pause();
-                    }}""")
-                    page.wait_for_timeout(500)
-            else:
-                # Одно видео — просто играем
-                page.evaluate("""() => {
-                    const v = document.querySelector('video');
-                    if (v) { v.muted = true; v.currentTime = 0; v.play().catch(() => {}); }
-                }""")
-                page.wait_for_timeout(12000)
-
+            page.wait_for_timeout(15000)
         except Exception as e:
             print(f"Playwright: page error {e}")
 
         context.close()
         browser.close()
 
-    # Найти записанный WebM файл
+    print(f"Playwright: captured {len(video_urls)} video URL groups")
+
+    if not video_urls:
+        # Fallback: recording
+        return _fallback_recording(rec_dir, tmp_dir)
+
+    # Для каждой группы CDN URL — скачиваем最大的 video
+    idx = 0
+    for base, url_list in video_urls.items():
+        # Берём URL с самым большим content-length
+        best_url, best_cl = max(url_list, key=lambda x: x[1])
+        if best_cl < 10000:
+            continue
+        print(f"Playwright: downloading video {idx} ({best_cl} bytes)")
+        mp4_path = os.path.join(tmp_dir, f"ig_video_{idx}.mp4")
+        try:
+            req = urllib.request.Request(best_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            resp = urllib.request.urlopen(req, timeout=60)
+            data = resp.read()
+            with open(mp4_path, "wb") as f:
+                f.write(data)
+            mp4_size = os.path.getsize(mp4_path)
+            if mp4_size > 1024:
+                results.append({"path": mp4_path, "kind": "video", "size": mp4_size})
+                idx += 1
+        except Exception as e:
+            print(f"Playwright: download error {e}")
+            continue
+
+    if results:
+        return results
+
+    return _fallback_recording(rec_dir, tmp_dir)
+
+
+def _fallback_recording(rec_dir: str, tmp_dir: str) -> list[dict]:
+    """Fallback: конвертируем записанный WebM → MP4."""
+    import subprocess
+    results = []
     webm_files = [f for f in os.listdir(rec_dir) if f.endswith(".webm")]
-    print(f"Playwright: found {len(webm_files)} webm files in {rec_dir}")
     if not webm_files:
         return results
 
@@ -422,21 +428,19 @@ def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
         return results
 
     webm_size = os.path.getsize(webm_path)
-    print(f"Playwright: webm size={webm_size}")
+    print(f"Playwright fallback: webm size={webm_size}")
     if webm_size < 1024:
         return results
 
-    # Конвертируем WebM -> MP4 через ffmpeg
     mp4_path = os.path.join(tmp_dir, "ig_video.mp4")
     try:
-        r = subprocess.run(
+        subprocess.run(
             ["ffmpeg", "-i", webm_path, "-c:v", "libx264", "-preset", "ultrafast",
              "-crf", "28", "-y", mp4_path],
             timeout=120, capture_output=True,
         )
-        print(f"Playwright: ffmpeg rc={r.returncode}, mp4 exists={os.path.isfile(mp4_path)}")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"Playwright: ffmpeg error {e}")
+        print(f"Playwright fallback: ffmpeg error {e}")
         return results
 
     if not os.path.isfile(mp4_path):
