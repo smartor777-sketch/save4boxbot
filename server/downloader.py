@@ -288,6 +288,109 @@ def _instagram_entry_format(entry: dict) -> str:
     return "img-best/best"
 
 
+INSTAGRAM_PLAYWRIGHT_VENV = os.getenv("INSTAGRAM_PLAYWRIGHT_VENV", "/opt/pw-venv")
+INSTAGRAM_COOKIES_PATH = os.getenv("INSTAGRAM_COOKIES_PATH", "")
+
+
+def _load_instagram_cookies() -> list[dict]:
+    """Загружает cookies из cookies.txt (Netscape format) для Playwright."""
+    cookie_path = INSTAGRAM_COOKIES_PATH
+    if not cookie_path:
+        cookie_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+    if not os.path.isfile(cookie_path):
+        return []
+    cookies = []
+    with open(cookie_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#") or not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                cookies.append({
+                    "name": parts[5],
+                    "value": parts[6],
+                    "domain": parts[0],
+                    "path": parts[2],
+                    "secure": parts[3].upper() == "TRUE",
+                })
+    return cookies
+
+
+def _download_instagram_via_playwright(url: str, tmp_dir: str) -> list[dict]:
+    """Скачивает Instagram post/reel через Playwright recording approach.
+    Записывает экран пока видео воспроизводится, конвертирует WebM -> MP4."""
+    import sys as _sys
+    import subprocess
+    venv_site = os.path.join(INSTAGRAM_PLAYWRIGHT_VENV, "lib", "python3.13", "site-packages")
+    if os.path.isdir(venv_site):
+        _sys.path.insert(0, venv_site)
+
+    from playwright.sync_api import sync_playwright
+
+    cookies = _load_instagram_cookies()
+    results = []
+
+    rec_dir = os.path.join(tmp_dir, "rec")
+    os.makedirs(rec_dir, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            record_video_dir=rec_dir,
+            record_video_size={"width": 1080, "height": 1920},
+        )
+        if cookies:
+            context.add_cookies(cookies)
+
+        page = context.new_page()
+
+        try:
+            page.goto(url, timeout=30000)
+            page.wait_for_timeout(12000)
+        except Exception:
+            pass
+
+        context.close()
+        browser.close()
+
+    # Найти записанный WebM файл
+    webm_files = [f for f in os.listdir(rec_dir) if f.endswith(".webm")]
+    if not webm_files:
+        return results
+
+    webm_path = os.path.join(rec_dir, webm_files[0])
+    if not os.path.isfile(webm_path):
+        return results
+
+    webm_size = os.path.getsize(webm_path)
+    if webm_size < 1024:
+        return results
+
+    # Конвертируем WebM -> MP4 через ffmpeg
+    mp4_path = os.path.join(tmp_dir, "ig_video.mp4")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-i", webm_path, "-c:v", "libx264", "-preset", "ultrafast",
+             "-crf", "28", "-y", mp4_path],
+            timeout=120, capture_output=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return results
+
+    if not os.path.isfile(mp4_path):
+        return results
+
+    mp4_size = os.path.getsize(mp4_path)
+    if mp4_size < 1024:
+        return results
+
+    results.append({"path": mp4_path, "kind": "video", "size": mp4_size})
+    return results
+
+
 def _first_downloaded_path(info: dict) -> str | None:
     """Путь первого скачанного файла из result_info."""
     dl = []
@@ -621,6 +724,9 @@ def _do_download_instagram(
                 with yt_dlp.YoutubeDL(_instagram_opts("", is_story=story)) as ydl:
                     meta = _extract_info_with_retry(ydl, url, download=False)
             except Exception as e:
+                if not story:
+                    # Posts/reels: пробуем Playwright fallback
+                    return _do_download_instagram_playwright(url, tmp, task_key)
                 return {"error": f"Не удалось получить информацию: {e}"}
 
             entries = meta.get("entries") or []
@@ -689,6 +795,50 @@ def _do_download_instagram(
                 "title": title,
                 "files": results,
             }
+    finally:
+        if task_key is not None:
+            _unregister_progress(task_key)
+
+
+def _do_download_instagram_playwright(
+    url: str, tmp: str, task_key: tuple[str, int | None, str | None] | None = None
+) -> dict:
+    """Fallback для Instagram posts/reels через Playwright."""
+    if task_key is not None:
+        _register_progress(task_key, status="extracting", started_at=time.time())
+
+    try:
+        tmp_dir = os.path.join(tmp, "pw_dl")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        pw_results = _download_instagram_via_playwright(url, tmp_dir)
+        if not pw_results:
+            return {"error": "Не удалось скачать видео (Playwright)"}
+
+        results = []
+        for item in pw_results:
+            src = item["path"]
+            if not os.path.exists(src):
+                continue
+            target = os.path.join(DOWNLOAD_DIR, os.path.basename(src))
+            shutil.move(src, target)
+            ext = os.path.splitext(target)[1].lower()
+            kind = "image" if ext in INSTAGRAM_IMAGE_EXTS else "video"
+            clean = _clean_instagram_name(os.path.basename(target), kind)
+            if clean != os.path.basename(target):
+                clean_target = os.path.join(DOWNLOAD_DIR, clean)
+                os.rename(target, clean_target)
+                target = clean_target
+            results.append({"filename": os.path.basename(target), "kind": kind})
+
+        if not results:
+            return {"error": "Файл не был создан (Playwright)"}
+
+        return {
+            "ok": True,
+            "title": "Instagram видео",
+            "files": results,
+        }
     finally:
         if task_key is not None:
             _unregister_progress(task_key)
