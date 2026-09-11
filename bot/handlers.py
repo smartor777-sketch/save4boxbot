@@ -397,7 +397,7 @@ def _pick_best(formats: list[dict]) -> dict | None:
 
 START_TEXT = (
     "👋 Привет! Я скачиваю видео и фото из YouTube, Instagram, TikTok, VK, "
-    "Rutube, Coub, Яндекс Видео и Dzen прямо в Telegram.\n\n"
+    "Rutube, Coub, Яндекс Видео, Dzen и Reddit - прямо в Telegram.\n\n"
     "Просто пришли ссылку на видео — и файл появится здесь "
     "(размер до 50 МБ, при необходимости предложу выбрать качество)."
 )
