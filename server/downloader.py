@@ -386,22 +386,11 @@ def _list_formats_reddit(url: str) -> dict:
     """Получает информацию о Reddit-посте через Playwright."""
     url = _resolve_reddit_share(url)
 
-    browser = None
     try:
-        browser = _get_reddit_browser()
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
-        _load_reddit_cookies(context)
-        page = context.new_page()
-
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(5000)
-
-        title = page.title() or "Reddit"
-
-        media = _extract_reddit_media(page)
-        context.close()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_reddit_playwright, url)
+            title, media = future.result(timeout=60)
 
         if not media:
             return {"error": "Не удалось извлечь медиа из Reddit-поста"}
@@ -427,8 +416,6 @@ def _list_formats_reddit(url: str) -> dict:
 
     except Exception as e:
         return {"error": f"Reddit: {e}"}
-    finally:
-        pass
 
 
 def list_formats(url: str) -> dict:
@@ -993,72 +980,16 @@ REDDIT_COOKIES_PATH = os.getenv("REDDIT_COOKIES_PATH", "/opt/yt-bot/reddit_cooki
 REDDIT_BROWSER_TTL_SEC = 300  # 5 минут — авто-закрытие
 
 _reddit_browser = None
+_reddit_playwright = None
 _reddit_browser_lock = threading.Lock()
 _reddit_browser_ts: float = 0
 
 
-def _get_reddit_browser():
-    """Запускает Playwright-браузер для Reddit (разделяемый, TTL 5 мин)."""
-    global _reddit_browser, _reddit_browser_ts
-    with _reddit_browser_lock:
-        now = time.time()
-        if _reddit_browser and now - _reddit_browser_ts < REDDIT_BROWSER_TTL_SEC:
-            return _reddit_browser
-        if _reddit_browser:
-            try:
-                _reddit_browser.close()
-            except Exception:
-                pass
-        _reddit_browser = None
-        _reddit_browser_ts = now
-
-    from playwright.sync_api import sync_playwright
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-blink-features=AutomationControlled",
-        ],
-    )
-
-    with _reddit_browser_lock:
-        _reddit_browser = browser
-        _reddit_browser_ts = now
-    return browser
-
-
-def _kill_reddit_browser():
-    global _reddit_browser, _reddit_browser_ts
-    with _reddit_browser_lock:
-        if _reddit_browser:
-            try:
-                _reddit_browser.close()
-            except Exception:
-                pass
-            _reddit_browser = None
-            _reddit_browser_ts = 0
-
-
-def _kill_reddit_browser():
-    global _reddit_browser, _reddit_browser_ts
-    with _reddit_browser_lock:
-        if _reddit_browser:
-            try:
-                _reddit_browser.close()
-            except Exception:
-                pass
-            _reddit_browser = None
-            _reddit_browser_ts = 0
-
-
-def _load_reddit_cookies(context):
-    """Загружает cookies.txt (Netscape) в Playwright context."""
-    if not os.path.isfile(REDDIT_COOKIES_PATH):
-        return
+def _load_reddit_cookies_sync():
+    """Загружает cookies.txt (Netscape) в список для Playwright."""
     cookies = []
+    if not os.path.isfile(REDDIT_COOKIES_PATH):
+        return cookies
     with open(REDDIT_COOKIES_PATH) as f:
         for line in f:
             line = line.strip()
@@ -1076,8 +1007,10 @@ def _load_reddit_cookies(context):
                 "secure": secure.upper() == "TRUE",
                 "httpOnly": False,
             })
-    if cookies:
-        context.add_cookies(cookies)
+    return cookies
+
+
+_REDDIT_COOKIES = _load_reddit_cookies_sync()
 
 
 def _resolve_reddit_share(url: str) -> str:
@@ -1086,7 +1019,6 @@ def _resolve_reddit_share(url: str) -> str:
     if not m:
         return url
     sub, share_id = m.group(1), m.group(2)
-    # Пробуем через Reddit JSON API (с куками)
     api_url = f"https://www.reddit.com/r/{sub}/s/{share_id}.json"
     try:
         resp = httpx.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15, follow_redirects=True)
@@ -1102,24 +1034,20 @@ def _resolve_reddit_share(url: str) -> str:
     return url
 
 
-def _extract_reddit_media(page) -> list[dict]:
-    """Извлекает медиа-URL из Reddit-страницы."""
+def _extract_reddit_media_sync(page) -> list[dict]:
+    """Извлекает медиа-URL из Reddit-страницы (sync evaluate)."""
     media = []
 
-    # Видео (reddit video / v.redd.it)
     videos = page.evaluate("""() => {
         const results = [];
-        // shreddit-video элементы
         document.querySelectorAll('shreddit-video, video-player, video').forEach(el => {
             const src = el.getAttribute('src') || el.querySelector('source')?.getAttribute('src');
             if (src && src.includes('v.redd.it')) results.push({url: src, type: 'video'});
         });
-        // Видео через source
         document.querySelectorAll('video source').forEach(el => {
             const src = el.getAttribute('src');
             if (src && src.includes('v.redd.it')) results.push({url: src, type: 'video'});
         });
-        // DASH видео
         document.querySelectorAll('[data-hls-url], [data-dash-url]').forEach(el => {
             const hls = el.getAttribute('data-hls-url');
             const dash = el.getAttribute('data-dash-url');
@@ -1130,22 +1058,18 @@ def _extract_reddit_media(page) -> list[dict]:
     }""")
     media.extend(videos)
 
-    # Картинки (gallery / preview / i.redd.it)
     images = page.evaluate("""() => {
         const results = [];
-        // Галерея Reddit
         document.querySelectorAll('gallery-carousel img, [data-testid="gallery-container"] img').forEach(el => {
             const src = el.getAttribute('src');
             if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
                 results.push({url: src, type: 'image'});
         });
-        // Preview картинки
         document.querySelectorAll('img').forEach(el => {
             const src = el.getAttribute('src');
             if (src && src.includes('i.redd.it'))
                 results.push({url: src, type: 'image'});
         });
-        // Reddit preview URLs (большое разрешение)
         document.querySelectorAll('a[href*="i.redd.it"]').forEach(el => {
             const href = el.getAttribute('href');
             if (href) results.push({url: href, type: 'image'});
@@ -1154,7 +1078,6 @@ def _extract_reddit_media(page) -> list[dict]:
     }""")
     media.extend(images)
 
-    # Дедупликация
     seen = set()
     unique = []
     for m in media:
@@ -1162,6 +1085,40 @@ def _extract_reddit_media(page) -> list[dict]:
             seen.add(m["url"])
             unique.append(m)
     return unique
+
+
+def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
+    """Запускает Playwright (sync) в отдельном потоке чтобы не мешать asyncio."""
+    from playwright.sync_api import sync_playwright
+
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        try:
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            )
+            if _REDDIT_COOKIES:
+                context.add_cookies(_REDDIT_COOKIES)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(5000)
+            title = page.title() or "Reddit"
+            media = _extract_reddit_media_sync(page)
+            context.close()
+            return title, media
+        finally:
+            browser.close()
+    finally:
+        pw.stop()
 
 
 def _do_download_reddit(url: str, height: int | None = None,
@@ -1174,22 +1131,12 @@ def _do_download_reddit(url: str, height: int | None = None,
     if task_key:
         _register_progress(task_key, status="extracting", started_at=time.time())
 
-    browser = None
     try:
-        browser = _get_reddit_browser()
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
-        _load_reddit_cookies(context)
-        page = context.new_page()
-
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(5000)
-
-        title = page.title() or "Reddit"
-
-        media = _extract_reddit_media(page)
-        context.close()
+        # Запускаем Playwright в отдельном потоке чтобы не блокировать asyncio
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_reddit_playwright, url)
+            title, media = future.result(timeout=60)
 
         if not media:
             return {"error": "Не удалось извлечь медиа из Reddit-поста"}
@@ -1214,7 +1161,6 @@ def _do_download_reddit(url: str, height: int | None = None,
                         opts["merge_output_format"] = "mp4"
                         with yt_dlp.YoutubeDL(opts) as ydl:
                             ydl.download([media_url])
-                        # yt-dlp might add its own extension
                         for f in os.listdir(tmp_dir):
                             if f.startswith(f"reddit_{i}") and f.endswith((".mp4", ".webm")):
                                 actual = os.path.join(tmp_dir, f)
