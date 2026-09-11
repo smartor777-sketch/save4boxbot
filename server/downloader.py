@@ -1087,7 +1087,7 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     except Exception as e:
         print(f"[reddit] JSON API failed: {e}")
 
-    # Fallback: DOM img extraction — собираем preview.redd.it текущего поста
+    # Fallback: DOM img extraction — собираем preview.redd.it текущего поста (только основной пост, не комментарии)
     if not media:
         try:
             post_prefix = page.evaluate("""() => {
@@ -1105,10 +1105,11 @@ def _extract_reddit_media_sync(page) -> list[dict]:
                 const seen = new Set();
                 document.querySelectorAll('img').forEach(el => {
                     const src = el.getAttribute('src') || '';
-                    if (src.includes('preview.redd.it') && !seen.has(src)) {
-                        seen.add(src);
-                        results.push(src);
-                    }
+                    if (!src.includes('preview.redd.it') || seen.has(src)) return;
+                    // Skip images inside shreddit-comment (comments section)
+                    if (el.closest('shreddit-comment')) return;
+                    seen.add(src);
+                    results.push(src);
                 });
                 return results;
             }""")
