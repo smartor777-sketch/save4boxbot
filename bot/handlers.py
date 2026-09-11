@@ -607,7 +607,17 @@ async def handle_ig_batch(callback: types.CallbackQuery):
     evt = _batch_wait.get(f"{key}:{sent}")
     if evt:
         evt.set()
-    await callback.message.edit_text(f"⏳ Отправляю следующие…")
+    await callback.message.edit_text("⏳ Отправляю следующие…")
+
+
+@router.callback_query(F.data.startswith("ig_batch_cancel:"))
+async def handle_ig_batch_cancel(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    key = parts[1]
+    sent = int(parts[2])
+    _batch_wait.pop(f"{key}:{sent}", None)
+    await callback.message.edit_text("❌ Отменено.")
 
 
 async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
@@ -667,75 +677,92 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
     first_kind = files[0].get("kind", "video")
     emoji = "🎬" if first_kind == "video" else "📸"
     caption = f"{emoji} {body.get('title')}" if body.get("title") else "🎬 Видео"
-    media_items = []
-    missing = []
-    for f in files:
-        local = _local_file_input(f["filename"])
-        if local is not None:
-            media_items.append((f["kind"], local))
-        else:
-            missing.append(f)
-    if missing:
-        try:
+
+    BATCH_SIZE = 5
+    total = len(files)
+
+    async def _send_one_file(f: dict, cap: str | None = None) -> None:
+        """Скачивает файл с сервера и отправляет в Telegram."""
+        bf = _local_file_input(f["filename"])
+        if bf is None:
+            timeout = httpx.Timeout(120.0, connect=10.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                for f in missing:
-                    r = await client.get(f"{config.SERVER_URL}/file/{quote(f['filename'])}")
-                    r.raise_for_status()
-                    media_items.append((f["kind"], BufferedInputFile(r.content, filename=f["filename"])))
-        except httpx.HTTPError as e:
-            await msg.edit_text(f"❌ Ошибка загрузки файла: {e}")
-            return
-
-    BATCH_SIZE = 10
-
-    async def _send_batch(items: list, cap: str | None = None) -> None:
-        if len(items) == 1:
-            kind, bf = items[0]
-            if kind == "video":
-                await msg.answer_video(bf, caption=cap, supports_streaming=True)
-            else:
-                await msg.answer_photo(bf, caption=cap)
+                r = await client.get(f"{config.SERVER_URL}/file/{quote(f['filename'])}")
+                r.raise_for_status()
+                bf = BufferedInputFile(r.content, filename=f["filename"])
+        if f.get("kind") == "video":
+            await msg.answer_video(bf, caption=cap, supports_streaming=True)
         else:
-            group = []
-            for i, (kind, bf) in enumerate(items):
-                if kind == "video":
-                    group.append(InputMediaVideo(media=bf, caption=cap if i == 0 else None))
-                else:
-                    group.append(InputMediaPhoto(media=bf, caption=cap if i == 0 else None))
-            await msg.answer_media_group(group)
+            await msg.answer_photo(bf, caption=cap)
 
     try:
-        total = len(media_items)
         if total <= BATCH_SIZE:
-            await _send_batch(media_items, caption)
+            # Мало файлов — скачиваем все и отправляем группой
+            media_items = []
+            for f in files:
+                bf = _local_file_input(f["filename"])
+                if bf is None:
+                    t = httpx.Timeout(120.0, connect=10.0)
+                    async with httpx.AsyncClient(timeout=t) as client:
+                        r = await client.get(f"{config.SERVER_URL}/file/{quote(f['filename'])}")
+                        r.raise_for_status()
+                        bf = BufferedInputFile(r.content, filename=f["filename"])
+                media_items.append((f.get("kind", "video"), bf))
+            if len(media_items) == 1:
+                kind, bf = media_items[0]
+                if kind == "video":
+                    await msg.answer_video(bf, caption=caption, supports_streaming=True)
+                else:
+                    await msg.answer_photo(bf, caption=caption)
+            else:
+                group = []
+                for i, (kind, bf) in enumerate(media_items):
+                    if kind == "video":
+                        group.append(InputMediaVideo(media=bf, caption=caption if i == 0 else None))
+                    else:
+                        group.append(InputMediaPhoto(media=bf, caption=caption if i == 0 else None))
+                await msg.answer_media_group(group)
         else:
-            # Первая порция
-            await _send_batch(media_items[:BATCH_SIZE], caption)
-            sent = BATCH_SIZE
-            while sent < total:
-                remaining = total - sent
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text=f"📥 Отправить ещё {min(BATCH_SIZE, remaining)} из {total}",
-                        callback_data=f"ig_batch:{key}:{sent}"
-                    )]
-                ])
-                status = await msg.answer(
-                    f"✅ Отправлено {sent} из {total}",
-                    reply_markup=kb
-                )
-                # Ждём нажатия (60 сек) или пропускаем
-                try:
-                    await asyncio.wait_for(
-                        _batch_wait.get(f"{key}:{sent}", asyncio.Event()).wait(),
-                        timeout=60
+            # Много файлов — отправляем по BATCH_SIZE, с кнопкой "ещё"
+            for start in range(0, total, BATCH_SIZE):
+                batch = files[start:start + BATCH_SIZE]
+                batch_num = start // BATCH_SIZE + 1
+                total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+                for i, f in enumerate(batch):
+                    cap = caption if start == 0 and i == 0 else None
+                    await _send_one_file(f, cap)
+
+                remaining = total - (start + BATCH_SIZE)
+                if remaining > 0:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=f"📥 Отправить следующие {min(BATCH_SIZE, remaining)} из {total}",
+                            callback_data=f"ig_batch:{key}:{start + BATCH_SIZE}"
+                        )],
+                        [InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=f"ig_batch_cancel:{key}:{start + BATCH_SIZE}",
+                            style="danger",
+                        )],
+                    ])
+                    status = await msg.answer(
+                        f"✅ Отправлено {start + len(batch)} из {total}",
+                        reply_markup=kb
                     )
-                    _batch_wait.pop(f"{key}:{sent}", None)
-                except (asyncio.TimeoutError, KeyError):
-                    await status.edit_text(f"⏰ Отменено. Отправлено {sent} из {total}")
-                    break
-                await _send_batch(media_items[sent:sent + BATCH_SIZE])
-                sent += BATCH_SIZE
+                    try:
+                        evt = asyncio.Event()
+                        _batch_wait[f"{key}:{start + BATCH_SIZE}"] = evt
+                        await asyncio.wait_for(evt.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        await status.edit_text("⏰ Время ожидания закончилось, скачивание прекращено")
+                        _batch_wait.pop(f"{key}:{start + BATCH_SIZE}", None)
+                        break
+                    except KeyError:
+                        # Кнопка отмены нажата — event уже удалён
+                        break
+                    finally:
+                        _batch_wait.pop(f"{key}:{start + BATCH_SIZE}", None)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Не удалось отправить: {e}")

@@ -32,6 +32,7 @@ RUTUBE_RE = re.compile(r"\brutube\.ru")
 COUB_RE = re.compile(r"\bcoub\.com")
 YANDEX_VIDEO_RE = re.compile(r"\byandex\.\w{2,3}(?:\.(?:am|ge|il|tr))?/video/(?:touch/)?preview")
 DZEN_RE = re.compile(r"\bdzen\.ru")
+REDDIT_RE = re.compile(r"(?:www\.)?reddit\.com|r\.redd\.it|reddit\.com")
 
 INSTAGRAM_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -172,6 +173,8 @@ def is_supported(url: str) -> str | None:
         return "yandex"
     if DZEN_RE.search(u):
         return "dzen"
+    if REDDIT_RE.search(u):
+        return "reddit"
     return None
 
 

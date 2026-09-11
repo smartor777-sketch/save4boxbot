@@ -53,6 +53,9 @@ _COUB_RE = re.compile(r"(?:www\.)?coub\.com/(?:view|embed|video)/([\w\-]+)")
 # Dzen — /video/watch/{id} и /shorts/{id} (shorts конвертируем в video/watch)
 _DZEN_RE = re.compile(r"dzen\.ru/(?:video/watch|shorts)/([\w\-]+)")
 
+# Reddit
+_REDDIT_RE = re.compile(r"(?:www\.)?reddit\.com/r/\w+/comments/[\w\-]+")
+
 
 def _video_id_from(url: str) -> str | None:
     for pattern in (_SHORTS_RE, _LIVE_RE, _EMBED_RE, _PATH_RE):
@@ -207,6 +210,26 @@ def extract_dzen_url(text: str) -> tuple[str, str] | None:
     return f"https://dzen.ru/video/watch/{m.group(1)}", m.group(1)
 
 
+def extract_reddit_url(text: str) -> tuple[str, str] | None:
+    """Возвращает (URL reddit, post_id) или None."""
+    raw_match = URL_RE.search(text.strip())
+    if not raw_match:
+        return None
+
+    raw = raw_match.group(0).rstrip(".,!?)")
+    if "reddit.com" not in raw and "redd.it" not in raw:
+        return None
+
+    m = _REDDIT_RE.search(raw)
+    if not m:
+        return None
+
+    # key = последний сегмент URL (post slug)
+    parts = m.group(0).rstrip("/").split("/")
+    key = parts[-1] if parts else m.group(0)
+    return raw, f"reddit_{key}"
+
+
 def extract_video(text: str) -> tuple[str, str, str] | None:
     """Возвращает (platform, url, key) или None."""
     parsed = extract_youtube_url(text)
@@ -241,4 +264,8 @@ def extract_video(text: str) -> tuple[str, str, str] | None:
     if parsed:
         url, key = parsed
         return "dzen", url, key
+    parsed = extract_reddit_url(text)
+    if parsed:
+        url, key = parsed
+        return "reddit", url, key
     return None
