@@ -1086,10 +1086,6 @@ def _extract_reddit_media_sync(page) -> list[dict]:
         document.querySelectorAll('gallery-carousel img').forEach(el => {
             let src = el.getAttribute('src');
             if (src) {
-                // Конвертируем preview.redd.it -> i.redd.it (оригиналы)
-                if (src.includes('preview.redd.it')) {
-                    src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
-                }
                 results.push({url: src, type: 'image'});
             }
         });
@@ -1097,21 +1093,14 @@ def _extract_reddit_media_sync(page) -> list[dict]:
         document.querySelectorAll('[data-testid="gallery-container"] img').forEach(el => {
             let src = el.getAttribute('src');
             if (src) {
-                if (src.includes('preview.redd.it')) {
-                    src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
-                }
                 results.push({url: src, type: 'image'});
             }
         });
         // figure/media контейнер с оригинальным изображением
         document.querySelectorAll('figure img, [data-testid="post-container"] img').forEach(el => {
             let src = el.getAttribute('src');
-            if (src && src.includes('i.redd.it') && !src.includes('preview'))
+            if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
                 results.push({url: src, type: 'image'});
-            else if (src && src.includes('preview.redd.it')) {
-                src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
-                results.push({url: src, type: 'image'});
-            }
         });
         // Все i.redd.it картинки (исключая preview и thumb)
         document.querySelectorAll('img').forEach(el => {
@@ -1137,8 +1126,6 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     has_video = any(m["type"] == "video" for m in unique)
     if has_video:
         unique = [m for m in unique if m["type"] == "video"]
-    # Убираемreddit preview заглушки (маленькие картинки 128x128)
-    unique = [m for m in unique if not (m["type"] == "image" and "preview.redd.it" in m["url"])]
     return unique
 
 
@@ -1248,8 +1235,23 @@ class _RedditBrowserPool:
                         finally:
                             page.close()
                     else:
-                        # Extract media from page
+                        # Extract media from page + intercept image responses
+                        captured_bytes = {}  # url -> bytes
+
+                        def _on_response(response):
+                            url_r = response.url
+                            if ('preview.redd.it' in url_r or 'i.redd.it' in url_r) and response.status == 200:
+                                try:
+                                    ct = response.headers.get('content-type', '')
+                                    if 'image' in ct:
+                                        body = response.body()
+                                        if len(body) > 1000:  # skip tiny icons
+                                            captured_bytes[url_r] = body
+                                except Exception:
+                                    pass
+
                         page = context.new_page()
+                        page.on('response', _on_response)
                         try:
                             page.goto(url, wait_until="domcontentloaded", timeout=30000)
                             page.wait_for_timeout(3000)
@@ -1262,10 +1264,29 @@ class _RedditBrowserPool:
                             except Exception:
                                 pass
 
+                            page.wait_for_timeout(5000)
+
+                            # Scroll to trigger lazy loading of gallery images
+                            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                             page.wait_for_timeout(3000)
+
                             title = page.title() or "Reddit"
                             media = _extract_reddit_media_sync(page)
-                            print(f"[reddit] {url} -> {len(media)} items")
+
+                            # Attach captured bytes to media items
+                            for item in media:
+                                item_url = item["url"]
+                                # Try exact match or base URL (without query params)
+                                if item_url in captured_bytes:
+                                    item["_bytes"] = captured_bytes[item_url]
+                                else:
+                                    base = item_url.split("?")[0]
+                                    for cap_url, cap_body in captured_bytes.items():
+                                        if cap_url.startswith(base):
+                                            item["_bytes"] = cap_body
+                                            break
+
+                            print(f"[reddit] {url} -> {len(media)} items, {len(captured_bytes)} images intercepted")
                             result_box[0] = (title, media)
                         finally:
                             page.close()
@@ -1357,14 +1378,21 @@ def _do_download_reddit(url: str, height: int | None = None,
                                     os.rename(actual, out_path)
                                     break
                     else:
-                        # Картинки скачиваем через Playwright pool (i.redd.it блокирует httpx)
-                        print(f"[reddit] Downloading image via browser: {media_url}")
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                            ok = ex.submit(_reddit_pool.download_image, media_url, out_path).result(timeout=30)
-                        if not ok:
-                            print(f"[reddit] Browser download failed for {media_url}")
-                            continue
+                        # Используем перехваченные байты из браузера
+                        captured = item.get("_bytes")
+                        if captured:
+                            with open(out_path, "wb") as f:
+                                f.write(captured)
+                            print(f"[reddit] Image from browser cache: {len(captured)} bytes")
+                        else:
+                            # Fallback: скачиваем через pool
+                            print(f"[reddit] Downloading image via browser: {media_url}")
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                                ok = ex.submit(_reddit_pool.download_image, media_url, out_path).result(timeout=30)
+                            if not ok:
+                                print(f"[reddit] Browser download failed for {media_url}")
+                                continue
 
                     if os.path.isfile(out_path) and os.path.getsize(out_path) > 25000:
                         downloaded.append(out_path)
