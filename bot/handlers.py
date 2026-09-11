@@ -486,6 +486,10 @@ async def _process_url(message: types.Message, text: str) -> None:
         await _handle_instagram(status, key, body)
         return
 
+    if body.get("platform") == "reddit":
+        await _handle_reddit(status, key, body)
+        return
+
     formats = body["formats"]
     available = _allowed(formats)
     available = _filter_by_height(available)
@@ -579,6 +583,25 @@ async def _handle_instagram(msg: types.Message, key: str, body: dict) -> None:
     await msg.edit_text(f"{emoji} {title}\n\nГотово к скачиванию:", reply_markup=kb)
 
 
+async def _handle_reddit(msg: types.Message, key: str, body: dict) -> None:
+    count = body.get("media_count", 1)
+    kind = body.get("kind", "image")
+    label = "⬇️ Скачать" if count == 1 else f"📦 Скачать ({count} файлов)"
+    emoji = "🎬" if kind == "video" else "📸" if kind == "image" else "🎞"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=f"reddit:{key}")],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить", callback_data=f"cancel:{key}", style="danger"
+                )
+            ],
+        ]
+    )
+    title = body.get("title", "Reddit")
+    await msg.edit_text(f"{emoji} {title}\n\nГотово к скачиванию:", reply_markup=kb)
+
+
 @router.callback_query(F.data.startswith("ig:"))
 async def handle_instagram_post(callback: types.CallbackQuery):
     await callback.answer()
@@ -612,6 +635,47 @@ async def handle_ig_batch(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("ig_batch_cancel:"))
 async def handle_ig_batch_cancel(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    key = parts[1]
+    sent = int(parts[2])
+    _batch_wait.pop(f"{key}:{sent}", None)
+    await callback.message.edit_text("❌ Отменено.")
+
+
+@router.callback_query(F.data.startswith("reddit:"))
+async def handle_reddit_post(callback: types.CallbackQuery):
+    await callback.answer()
+    key = callback.data.split(":", 1)[1]
+    url = URLS.get(key)
+    if not url:
+        await callback.message.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
+        return
+    marker = f"reddit:{key}"
+    if marker in _IN_FLIGHT:
+        await callback.answer("⏳ Уже скачиваю, чуть позже…", show_alert=False)
+        return
+    _IN_FLIGHT.add(marker)
+    try:
+        await _download_reddit_and_send(callback.message, key)
+    finally:
+        _IN_FLIGHT.discard(marker)
+
+
+@router.callback_query(F.data.startswith("reddit_batch:"))
+async def handle_reddit_batch(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    key = parts[1]
+    sent = int(parts[2])
+    evt = _batch_wait.get(f"{key}:{sent}")
+    if evt:
+        evt.set()
+    await callback.message.edit_text("⏳ Отправляю следующие…")
+
+
+@router.callback_query(F.data.startswith("reddit_batch_cancel:"))
+async def handle_reddit_batch_cancel(callback: types.CallbackQuery):
     await callback.answer()
     parts = callback.data.split(":")
     key = parts[1]
@@ -760,6 +824,155 @@ async def _download_instagram_and_send(msg: types.Message, key: str) -> None:
                         break
                     except KeyError:
                         # Кнопка отмены нажата — event уже удалён
+                        break
+                    finally:
+                        _batch_wait.pop(f"{key}:{start + BATCH_SIZE}", None)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"❌ Не удалось отправить: {e}")
+
+
+async def _download_reddit_and_send(msg: types.Message, key: str) -> None:
+    url = URLS.get(key)
+    if not url:
+        await msg.edit_text("❌ Ссылка устарела, пришли её ещё раз.")
+        return
+
+    await msg.edit_text("⏳ Скачиваю…")
+    timeout = httpx.Timeout(300.0, connect=10.0)
+
+    retry_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Попробовать ещё раз", callback_data=f"reddit:{key}"
+                )
+            ]
+        ]
+    )
+
+    async def _post() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(
+                f"{config.SERVER_URL}/download", json={"url": url}
+            )
+
+    post_task = asyncio.create_task(_post())
+    poll_task = asyncio.create_task(
+        _poll_progress(msg, "пост", url, None, post_task)
+    )
+    try:
+        try:
+            resp = await post_task
+        except httpx.HTTPError as e:
+            await msg.edit_text(f"❌ Ошибка связи с сервером: {e}")
+            return
+        body = resp.json()
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
+
+    if resp.status_code == 503:
+        await msg.edit_text("⚠️ Бот перегружен, пришлите Вашу ссылку позже.", reply_markup=retry_kb)
+        return
+
+    if not body.get("ok"):
+        error = body.get("error", "Неизвестная ошибка")
+        await msg.edit_text(f"❌ {_friendly_error(error)}", reply_markup=retry_kb if "перегружен" in error else None)
+        return
+
+    files = body.get("files") or []
+    if not files:
+        await msg.edit_text("❌ Файл не был создан")
+        return
+
+    first_kind = files[0].get("kind", "video")
+    emoji = "🎬" if first_kind == "video" else "📸"
+    caption = f"{emoji} {body.get('title')}" if body.get("title") else "🎬 Reddit"
+
+    BATCH_SIZE = 5
+    total = len(files)
+
+    def _file_path(f: dict) -> str:
+        return f.get("path") or f.get("filename") or ""
+
+    async def _send_one_file(f: dict, cap: str | None = None) -> None:
+        fp = _file_path(f)
+        fname = os.path.basename(fp)
+        bf = _local_file_input(fname)
+        if bf is None:
+            t = httpx.Timeout(120.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=t) as client:
+                r = await client.get(f"{config.SERVER_URL}/file/{quote(fname)}")
+                r.raise_for_status()
+                bf = BufferedInputFile(r.content, filename=fname)
+        if f.get("kind") == "video":
+            await msg.answer_video(bf, caption=cap, supports_streaming=True)
+        else:
+            await msg.answer_photo(bf, caption=cap)
+
+    try:
+        if total <= BATCH_SIZE:
+            media_items = []
+            for f in files:
+                fp = _file_path(f)
+                fname = os.path.basename(fp)
+                bf = _local_file_input(fname)
+                if bf is None:
+                    t = httpx.Timeout(120.0, connect=10.0)
+                    async with httpx.AsyncClient(timeout=t) as client:
+                        r = await client.get(f"{config.SERVER_URL}/file/{quote(fname)}")
+                        r.raise_for_status()
+                        bf = BufferedInputFile(r.content, filename=fname)
+                media_items.append((f.get("kind", "video"), bf))
+            if len(media_items) == 1:
+                kind, bf = media_items[0]
+                if kind == "video":
+                    await msg.answer_video(bf, caption=caption, supports_streaming=True)
+                else:
+                    await msg.answer_photo(bf, caption=caption)
+            else:
+                group = []
+                for i, (kind, bf) in enumerate(media_items):
+                    if kind == "video":
+                        group.append(InputMediaVideo(media=bf, caption=caption if i == 0 else None))
+                    else:
+                        group.append(InputMediaPhoto(media=bf, caption=caption if i == 0 else None))
+                await msg.answer_media_group(group)
+        else:
+            for start in range(0, total, BATCH_SIZE):
+                batch = files[start:start + BATCH_SIZE]
+
+                for i, f in enumerate(batch):
+                    cap = caption if start == 0 and i == 0 else None
+                    await _send_one_file(f, cap)
+
+                remaining = total - (start + BATCH_SIZE)
+                if remaining > 0:
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=f"📥 Отправить следующие {min(BATCH_SIZE, remaining)} из {total}",
+                            callback_data=f"reddit_batch:{key}:{start + BATCH_SIZE}"
+                        )],
+                        [InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=f"reddit_batch_cancel:{key}:{start + BATCH_SIZE}",
+                            style="danger",
+                        )],
+                    ])
+                    status = await msg.answer(
+                        f"✅ Отправлено {start + len(batch)} из {total}",
+                        reply_markup=kb
+                    )
+                    try:
+                        evt = asyncio.Event()
+                        _batch_wait[f"{key}:{start + BATCH_SIZE}"] = evt
+                        await asyncio.wait_for(evt.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        await status.edit_text("⏰ Время ожидания закончилось, скачивание прекращено")
+                        _batch_wait.pop(f"{key}:{start + BATCH_SIZE}", None)
+                        break
+                    except KeyError:
                         break
                     finally:
                         _batch_wait.pop(f"{key}:{start + BATCH_SIZE}", None)
