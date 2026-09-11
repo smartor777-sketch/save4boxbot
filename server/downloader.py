@@ -1112,6 +1112,10 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     has_external = any(m.get("external") for m in unique)
     if has_external:
         unique = [m for m in unique if m.get("external") or "i.redd.it" not in m["url"]]
+    # Если есть видео — убираем статичные картинки (заглушки)
+    has_video = any(m["type"] == "video" for m in unique)
+    if has_video:
+        unique = [m for m in unique if m["type"] == "video"]
     return unique
 
 
@@ -1273,8 +1277,11 @@ def _do_download_reddit(url: str, height: int | None = None,
                 try:
                     if item["type"] == "video":
                         opts = _base_opts(out_path)
-                        opts["format"] = "best"
+                        opts["format"] = "bestvideo+bestaudio/best"
                         opts["merge_output_format"] = "mp4"
+                        # v.redd.it requires cookies
+                        if "v.redd.it" in media_url and os.path.isfile(REDDIT_COOKIES_PATH):
+                            opts["cookiefile"] = REDDIT_COOKIES_PATH
                         with yt_dlp.YoutubeDL(opts) as ydl:
                             ydl.download([media_url])
                         for f in os.listdir(tmp_dir):
