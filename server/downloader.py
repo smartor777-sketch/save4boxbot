@@ -1083,33 +1083,39 @@ def _extract_reddit_media_sync(page) -> list[dict]:
             }
         });
         // Галерея Reddit — извлекаем ВСЕ картинки из carousel
-        document.querySelectorAll('gallery-carousel shreddit-gallery-carousel-media, gallery-carousel [data-testid="gallery-carousel-media"]').forEach(el => {
-            const img = el.querySelector('img');
-            if (img) {
-                const src = img.getAttribute('src');
-                if (src) results.push({url: src, type: 'image'});
-            }
-        });
-        // Галерея Reddit — все img внутри gallery-carousel
         document.querySelectorAll('gallery-carousel img').forEach(el => {
-            const src = el.getAttribute('src');
-            if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
+            let src = el.getAttribute('src');
+            if (src) {
+                // Конвертируем preview.redd.it -> i.redd.it (оригиналы)
+                if (src.includes('preview.redd.it')) {
+                    src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
+                }
                 results.push({url: src, type: 'image'});
+            }
         });
         // data-testid="gallery-container"  
         document.querySelectorAll('[data-testid="gallery-container"] img').forEach(el => {
-            const src = el.getAttribute('src');
-            if (src) results.push({url: src, type: 'image'});
+            let src = el.getAttribute('src');
+            if (src) {
+                if (src.includes('preview.redd.it')) {
+                    src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
+                }
+                results.push({url: src, type: 'image'});
+            }
         });
         // figure/media контейнер с оригинальным изображением
         document.querySelectorAll('figure img, [data-testid="post-container"] img').forEach(el => {
-            const src = el.getAttribute('src');
+            let src = el.getAttribute('src');
             if (src && src.includes('i.redd.it') && !src.includes('preview'))
                 results.push({url: src, type: 'image'});
+            else if (src && src.includes('preview.redd.it')) {
+                src = src.replace(/preview\\.redd\\.it\\/([^?]+).*/, 'i.redd.it/$1');
+                results.push({url: src, type: 'image'});
+            }
         });
         // Все i.redd.it картинки (исключая preview и thumb)
         document.querySelectorAll('img').forEach(el => {
-            const src = el.getAttribute('src');
+            let src = el.getAttribute('src');
             if (src && src.includes('i.redd.it') && !src.includes('preview') && !src.includes('thumb'))
                 results.push({url: src, type: 'image'});
         });
@@ -1131,6 +1137,8 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     has_video = any(m["type"] == "video" for m in unique)
     if has_video:
         unique = [m for m in unique if m["type"] == "video"]
+    # Убираемreddit preview заглушки (маленькие картинки 128x128)
+    unique = [m for m in unique if not (m["type"] == "image" and "preview.redd.it" in m["url"])]
     return unique
 
 
@@ -1158,7 +1166,7 @@ class _RedditBrowserPool:
 
         while True:
             try:
-                url, result_event, result_box = self._queue.get(timeout=self._ttl)
+                item = self._queue.get(timeout=self._ttl)
             except queue.Empty:
                 # TTL expired — close browser
                 if browser:
@@ -1175,6 +1183,14 @@ class _RedditBrowserPool:
                     pw = None
                 print("[reddit] Browser closed (idle TTL)")
                 continue
+
+            # Parse item: extract or download
+            if item[0] == "__download__":
+                _, image_url, out_path, result_event, result_box = item
+                task_type = "download"
+            else:
+                url, result_event, result_box = item
+                task_type = "extract"
 
             try:
                 # Start browser if needed
@@ -1203,30 +1219,56 @@ class _RedditBrowserPool:
 
                 last_used = time.time()
 
-                # Do the work
+                # Create context with cookies
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 )
                 if _REDDIT_COOKIES:
                     context.add_cookies(_REDDIT_COOKIES)
-                page = context.new_page()
+
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(3000)
+                    if task_type == "download":
+                        # Download image through browser page
+                        page = context.new_page()
+                        try:
+                            resp = page.goto(image_url, wait_until="commit", timeout=15000)
+                            if resp and resp.ok:
+                                body = resp.body()
+                                with open(out_path, "wb") as f:
+                                    f.write(body)
+                                result_box[0] = True
+                                print(f"[reddit] Image downloaded: {len(body)} bytes")
+                            else:
+                                status = resp.status if resp else "no response"
+                                print(f"[reddit] Image download failed: {status}")
+                                result_box[0] = False
+                        except Exception as e:
+                            print(f"[reddit] Image download error: {e}")
+                            result_box[0] = False
+                        finally:
+                            page.close()
+                    else:
+                        # Extract media from page
+                        page = context.new_page()
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            page.wait_for_timeout(3000)
 
-                    try:
-                        age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
-                        if age_btn.count() > 0:
-                            age_btn.first.click()
-                            page.wait_for_timeout(2000)
-                    except Exception:
-                        pass
+                            try:
+                                age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
+                                if age_btn.count() > 0:
+                                    age_btn.first.click()
+                                    page.wait_for_timeout(2000)
+                            except Exception:
+                                pass
 
-                    page.wait_for_timeout(3000)
-                    title = page.title() or "Reddit"
-                    media = _extract_reddit_media_sync(page)
-                    print(f"[reddit] {url} -> {len(media)} items")
-                    result_box[0] = (title, media)
+                            page.wait_for_timeout(3000)
+                            title = page.title() or "Reddit"
+                            media = _extract_reddit_media_sync(page)
+                            print(f"[reddit] {url} -> {len(media)} items")
+                            result_box[0] = (title, media)
+                        finally:
+                            page.close()
                 finally:
                     context.close()
 
@@ -1247,12 +1289,22 @@ class _RedditBrowserPool:
             raise result_box[0]
         return result_box[0]
 
+    def download_image(self, image_url: str, out_path: str, timeout: float = 30) -> bool:
+        """Download image through browser (bypasses 403)."""
+        result_event = threading.Event()
+        result_box = [None]
+        self._queue.put(("__download__", image_url, out_path, result_event, result_box))
+        result_event.wait(timeout=timeout)
+        return result_box[0] if result_box[0] is not None else False
+
 
 _reddit_pool = _RedditBrowserPool(ttl_sec=REDDIT_BROWSER_TTL_SEC)
 
 
-def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
-    """Extract media from Reddit using shared browser pool (thread-safe)."""
+def _run_reddit_playwright(url: str) -> tuple[str, list[dict], object]:
+    """Extract media from Reddit using shared browser pool (thread-safe).
+    Returns (title, media_list, page_object) for in-browser downloads.
+    """
     return _reddit_pool.extract(url)
 
 
@@ -1294,7 +1346,6 @@ def _do_download_reddit(url: str, height: int | None = None,
                         opts = _base_opts(out_path)
                         opts["format"] = "bestvideo+bestaudio/best"
                         opts["merge_output_format"] = "mp4"
-                        # v.redd.it requires cookies
                         if "v.redd.it" in media_url and os.path.isfile(REDDIT_COOKIES_PATH):
                             opts["cookiefile"] = REDDIT_COOKIES_PATH
                         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1306,12 +1357,19 @@ def _do_download_reddit(url: str, height: int | None = None,
                                     os.rename(actual, out_path)
                                     break
                     else:
-                        resp = httpx.get(media_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-                        with open(out_path, "wb") as f:
-                            f.write(resp.content)
+                        # Картинки скачиваем через Playwright pool (i.redd.it блокирует httpx)
+                        print(f"[reddit] Downloading image via browser: {media_url}")
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                            ok = ex.submit(_reddit_pool.download_image, media_url, out_path).result(timeout=30)
+                        if not ok:
+                            print(f"[reddit] Browser download failed for {media_url}")
+                            continue
 
-                    if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                    if os.path.isfile(out_path) and os.path.getsize(out_path) > 25000:
                         downloaded.append(out_path)
+                    elif os.path.isfile(out_path):
+                        os.remove(out_path)  # заглушка
                 except Exception as e:
                     print(f"[reddit] Failed to download {media_url}: {e}")
 
