@@ -1039,6 +1039,101 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     """Извлекает медиа-URL из Reddit-страницы (sync evaluate)."""
     media = []
 
+    # Пробуем извлечь из Reddit JSON API (надёжнее для галерей)
+    try:
+        page_url = page.url
+        # Используем fetch из браузера (с cookies)
+        json_url = page_url.rstrip('/') + '.json'
+        print(f"[reddit] Trying JSON API via browser: {json_url}")
+        api_result = page.evaluate("""async (url) => {
+            try {
+                const resp = await fetch(url, {credentials: 'include'});
+                if (!resp.ok) return {error: resp.status};
+                const data = await resp.json();
+                const results = [];
+                if (Array.isArray(data) && data.length > 0) {
+                    const post = data[0]?.data?.children?.[0]?.data;
+                    if (post) {
+                        // Галерея
+                        const meta = post.media_metadata || {};
+                        for (const [id, item] of Object.entries(meta)) {
+                            if (item.status === 'valid') {
+                                const s = item.s || {};
+                                const u = s.u || s.gif || '';
+                                if (u) results.push(u.replace(/&amp;/g, '&'));
+                            }
+                        }
+                        // Одиночная картинка
+                        if (results.length === 0) {
+                            const imgs = post.preview?.images || [];
+                            for (const img of imgs) {
+                                const src = img.source?.url || '';
+                                if (src) results.push(src.replace(/&amp;/g, '&'));
+                            }
+                        }
+                    }
+                }
+                return {images: results};
+            } catch(e) {
+                return {error: e.message};
+            }
+        }""", json_url)
+        print(f"[reddit] JSON API result: {api_result}")
+        if api_result and not api_result.get("error"):
+            for img_url in api_result.get("images", []):
+                media.append({"url": img_url, "type": "image"})
+            if media:
+                print(f"[reddit] JSON API: found {len(media)} images")
+    except Exception as e:
+        print(f"[reddit] JSON API failed: {e}")
+
+    # Fallback: DOM img extraction — собираем preview.redd.it текущего поста
+    if not media:
+        try:
+            post_prefix = page.evaluate("""() => {
+                const post = document.querySelector('shreddit-post');
+                if (post) {
+                    const perm = post.getAttribute('permalink') || '';
+                    return perm.split('/').filter(Boolean).pop() || '';
+                }
+                return '';
+            }""")
+            post_prefix_hyphen = post_prefix.replace("_", "-") if post_prefix else ""
+
+            all_imgs = page.evaluate("""() => {
+                const results = [];
+                const seen = new Set();
+                document.querySelectorAll('img').forEach(el => {
+                    const src = el.getAttribute('src') || '';
+                    if (src.includes('preview.redd.it') && !seen.has(src)) {
+                        seen.add(src);
+                        results.push(src);
+                    }
+                });
+                return results;
+            }""")
+
+            existing_urls = set()
+            for img_url in all_imgs:
+                base = img_url.split("?")[0]
+                if base in existing_urls:
+                    continue
+                if post_prefix and (post_prefix in img_url or post_prefix_hyphen in img_url):
+                    media.append({"url": img_url, "type": "image"})
+                    existing_urls.add(base)
+                elif not post_prefix:
+                    media.append({"url": img_url, "type": "image"})
+                    existing_urls.add(base)
+
+            if media:
+                print(f"[reddit] DOM extraction: {len(media)} images")
+        except Exception as e:
+            print(f"[reddit] DOM extraction error: {e}")
+
+    if media:
+        return media
+
+    # Fallback: DOM extraction
     videos = page.evaluate("""() => {
         const results = [];
         document.querySelectorAll('shreddit-video, video-player, video').forEach(el => {
@@ -1126,6 +1221,8 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     has_video = any(m["type"] == "video" for m in unique)
     if has_video:
         unique = [m for m in unique if m["type"] == "video"]
+    # Убираемreddit placeholder icons (gtqlqg7tb6nh1.png и подобные)
+    unique = [m for m in unique if "gtqlqg7tb6nh1" not in m["url"]]
     return unique
 
 
@@ -1235,23 +1332,8 @@ class _RedditBrowserPool:
                         finally:
                             page.close()
                     else:
-                        # Extract media from page + intercept image responses
-                        captured_bytes = {}  # url -> bytes
-
-                        def _on_response(response):
-                            url_r = response.url
-                            if ('preview.redd.it' in url_r or 'i.redd.it' in url_r) and response.status == 200:
-                                try:
-                                    ct = response.headers.get('content-type', '')
-                                    if 'image' in ct:
-                                        body = response.body()
-                                        if len(body) > 1000:  # skip tiny icons
-                                            captured_bytes[url_r] = body
-                                except Exception:
-                                    pass
-
+                        # Extract media from page, then download images via ctx.request.get()
                         page = context.new_page()
-                        page.on('response', _on_response)
                         try:
                             page.goto(url, wait_until="domcontentloaded", timeout=30000)
                             page.wait_for_timeout(3000)
@@ -1266,28 +1348,57 @@ class _RedditBrowserPool:
 
                             page.wait_for_timeout(5000)
 
-                            # Scroll to trigger lazy loading of gallery images
-                            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                            page.wait_for_timeout(3000)
+                            # Scroll to trigger lazy loading
+                            for _ in range(3):
+                                page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                                page.wait_for_timeout(1500)
+
+                            # Click gallery next buttons to trigger lazy loading of all images
+                            try:
+                                for _ in range(15):
+                                    next_btn = page.locator('[aria-label="Next"], [data-testid="gallery-carousel-next"], button[aria-label*="next" i]')
+                                    if next_btn.count() > 0:
+                                        next_btn.first.click(timeout=1000)
+                                        page.wait_for_timeout(500)
+                                    else:
+                                        break
+                                page.evaluate('window.scrollTo(0, 0)')
+                                page.wait_for_timeout(1000)
+                            except Exception:
+                                pass
 
                             title = page.title() or "Reddit"
                             media = _extract_reddit_media_sync(page)
 
-                            # Attach captured bytes to media items
+                            # Download each image via browser context (bypasses Cloudflare)
+                            PLACEHOLDER_HASHES = {"gtqlqg7tb6nh1", "qih5sp46ikoh1"}
+                            downloaded_media = []
                             for item in media:
-                                item_url = item["url"]
-                                # Try exact match or base URL (without query params)
-                                if item_url in captured_bytes:
-                                    item["_bytes"] = captured_bytes[item_url]
-                                else:
-                                    base = item_url.split("?")[0]
-                                    for cap_url, cap_body in captured_bytes.items():
-                                        if cap_url.startswith(base):
-                                            item["_bytes"] = cap_body
-                                            break
+                                if item["type"] != "image":
+                                    downloaded_media.append(item)
+                                    continue
+                                img_url = item["url"]
+                                # Skip placeholders
+                                if any(h in img_url for h in PLACEHOLDER_HASHES):
+                                    continue
+                                try:
+                                    resp = context.request.get(img_url)
+                                    if resp.status == 200:
+                                        ct = resp.headers.get("content-type", "")
+                                        if "image" in ct:
+                                            body = resp.body()
+                                            item["_bytes"] = body
+                                            print(f"[reddit] Downloaded: {len(body)} bytes - {img_url[:100]}")
+                                        else:
+                                            print(f"[reddit] Skipped (ct={ct}): {img_url[:80]}")
+                                    else:
+                                        print(f"[reddit] Failed ({resp.status}): {img_url[:80]}")
+                                except Exception as e:
+                                    print(f"[reddit] Download error: {e}")
+                                downloaded_media.append(item)
 
-                            print(f"[reddit] {url} -> {len(media)} items, {len(captured_bytes)} images intercepted")
-                            result_box[0] = (title, media)
+                            print(f"[reddit] {url} -> {len(downloaded_media)} items")
+                            result_box[0] = (title, downloaded_media)
                         finally:
                             page.close()
                 finally:
