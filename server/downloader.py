@@ -1,4 +1,5 @@
 import os
+import queue
 import re
 import shutil
 import tempfile
@@ -1115,95 +1116,125 @@ def _extract_reddit_media_sync(page) -> list[dict]:
 
 
 class _RedditBrowserPool:
-    """Shared Playwright browser pool for Reddit (TTL 5 min).
+    """Shared Playwright browser for Reddit (single-threaded, TTL 5 min).
 
-    Browser is created once and reused across requests. After TTL of
-    inactivity, browser is closed and recreated on next request.
+    All Playwright operations run in a dedicated worker thread to avoid
+    cross-thread issues. Requests are queued and processed sequentially.
     """
 
     def __init__(self, ttl_sec: int = 300):
         self._ttl = ttl_sec
-        self._pw = None
-        self._browser = None
-        self._last_used = 0.0
-        self._lock = threading.Lock()
+        self._queue = queue.Queue()
+        self._worker = threading.Thread(target=self._run_worker, daemon=True)
+        self._worker.start()
 
-    def _start(self):
+    def _run_worker(self):
+        """Dedicated thread: keeps browser alive, processes requests."""
         from playwright.sync_api import sync_playwright
-        self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        self._last_used = time.time()
-        print("[reddit] Browser started")
+        import queue
 
-    def _stop(self):
-        try:
-            if self._browser:
-                self._browser.close()
-        except Exception:
-            pass
-        try:
-            if self._pw:
-                self._pw.stop()
-        except Exception:
-            pass
-        self._browser = None
-        self._pw = None
-        self._last_used = 0.0
-        print("[reddit] Browser stopped")
+        pw = None
+        browser = None
+        last_used = 0.0
 
-    def get_browser(self):
-        """Return a live browser, creating one if needed."""
-        with self._lock:
-            now = time.time()
-            # Recreate if expired or dead
-            if self._browser is None or now - self._last_used > self._ttl:
-                self._stop()
-                self._start()
-            self._last_used = now
-            return self._browser
+        while True:
+            try:
+                url, result_event, result_box = self._queue.get(timeout=self._ttl)
+            except queue.Empty:
+                # TTL expired — close browser
+                if browser:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                    browser = None
+                if pw:
+                    try:
+                        pw.stop()
+                    except Exception:
+                        pass
+                    pw = None
+                print("[reddit] Browser closed (idle TTL)")
+                continue
+
+            try:
+                # Start browser if needed
+                if browser is None or not browser.is_connected():
+                    if browser:
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+                    if pw:
+                        try:
+                            pw.stop()
+                        except Exception:
+                            pass
+                    pw = sync_playwright().start()
+                    browser = pw.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--disable-blink-features=AutomationControlled",
+                        ],
+                    )
+                    print("[reddit] Browser started")
+
+                last_used = time.time()
+
+                # Do the work
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                )
+                if _REDDIT_COOKIES:
+                    context.add_cookies(_REDDIT_COOKIES)
+                page = context.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3000)
+
+                    try:
+                        age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
+                        if age_btn.count() > 0:
+                            age_btn.first.click()
+                            page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+                    page.wait_for_timeout(3000)
+                    title = page.title() or "Reddit"
+                    media = _extract_reddit_media_sync(page)
+                    print(f"[reddit] {url} -> {len(media)} items")
+                    result_box[0] = (title, media)
+                finally:
+                    context.close()
+
+            except Exception as e:
+                result_box[0] = Exception(f"Reddit: {e}")
+            finally:
+                result_event.set()
+
+    def extract(self, url: str, timeout: float = 90) -> tuple[str, list[dict]]:
+        """Submit URL and wait for result (blocks caller thread)."""
+        result_event = threading.Event()
+        result_box = [None]
+        self._queue.put((url, result_event, result_box))
+        result_event.wait(timeout=timeout)
+        if result_box[0] is None:
+            raise TimeoutError("Reddit Playwright timed out")
+        if isinstance(result_box[0], Exception):
+            raise result_box[0]
+        return result_box[0]
 
 
 _reddit_pool = _RedditBrowserPool(ttl_sec=REDDIT_BROWSER_TTL_SEC)
 
 
 def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
-    """Extract media from Reddit using shared browser pool."""
-    browser = _reddit_pool.get_browser()
-
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    )
-    if _REDDIT_COOKIES:
-        context.add_cookies(_REDDIT_COOKIES)
-    page = context.new_page()
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
-
-        # Кликаем "Yes" на age-gate если есть
-        try:
-            age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
-            if age_btn.count() > 0:
-                age_btn.first.click()
-                page.wait_for_timeout(2000)
-        except Exception:
-            pass
-
-        page.wait_for_timeout(3000)
-        title = page.title() or "Reddit"
-        media = _extract_reddit_media_sync(page)
-        print(f"[reddit] {url} -> {len(media)} items: {[m['type'] for m in media]}")
-        return title, media
-    finally:
-        context.close()
+    """Extract media from Reddit using shared browser pool (thread-safe)."""
+    return _reddit_pool.extract(url)
 
 
 def _do_download_reddit(url: str, height: int | None = None,
