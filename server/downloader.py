@@ -1106,8 +1106,8 @@ def _extract_reddit_media_sync(page) -> list[dict]:
                 document.querySelectorAll('img').forEach(el => {
                     const src = el.getAttribute('src') || '';
                     if (!src.includes('preview.redd.it') || seen.has(src)) return;
-                    // Skip images inside shreddit-comment (comments section)
-                    if (el.closest('shreddit-comment')) return;
+                    // Only images inside the main post (not comments, not ads)
+                    if (!el.closest('shreddit-post')) return;
                     seen.add(src);
                     results.push(src);
                 });
@@ -1178,28 +1178,28 @@ def _extract_reddit_media_sync(page) -> list[dict]:
                 results.push({url: preview, type: 'image'});
             }
         });
-        // Галерея Reddit — извлекаем ВСЕ картинки из carousel
-        document.querySelectorAll('gallery-carousel img').forEach(el => {
+        // Галерея Reddit — извлекаем ВСЕ картинки из carousel (только внутри shreddit-post)
+        document.querySelectorAll('shreddit-post gallery-carousel img').forEach(el => {
             let src = el.getAttribute('src');
             if (src) {
                 results.push({url: src, type: 'image'});
             }
         });
-        // data-testid="gallery-container"  
-        document.querySelectorAll('[data-testid="gallery-container"] img').forEach(el => {
+        // data-testid="gallery-container" (только внутри shreddit-post)
+        document.querySelectorAll('shreddit-post [data-testid="gallery-container"] img').forEach(el => {
             let src = el.getAttribute('src');
             if (src) {
                 results.push({url: src, type: 'image'});
             }
         });
-        // figure/media контейнер с оригинальным изображением
-        document.querySelectorAll('figure img, [data-testid="post-container"] img').forEach(el => {
+        // figure/media контейнер с оригинальным изображением (только внутри shreddit-post)
+        document.querySelectorAll('shreddit-post figure img, shreddit-post [data-testid="post-container"] img').forEach(el => {
             let src = el.getAttribute('src');
             if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
                 results.push({url: src, type: 'image'});
         });
-        // Все i.redd.it картинки (исключая preview и thumb)
-        document.querySelectorAll('img').forEach(el => {
+        // Все i.redd.it картинки внутри shreddit-post (исключая preview и thumb)
+        document.querySelectorAll('shreddit-post img').forEach(el => {
             let src = el.getAttribute('src');
             if (src && src.includes('i.redd.it') && !src.includes('preview') && !src.includes('thumb'))
                 results.push({url: src, type: 'image'});
