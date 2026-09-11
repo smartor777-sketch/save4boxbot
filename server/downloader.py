@@ -1069,6 +1069,8 @@ def _extract_reddit_media_sync(page) -> list[dict]:
                     results.push({url: href, type: 'image'});
                 } else if (href.includes('v.redd.it') || href.includes('.mp4')) {
                     results.push({url: href, type: 'video'});
+                } else if (href.includes('reddit.com/gallery/')) {
+                    // Галерею пропускаем — картинки извлекаем из carousel ниже
                 } else {
                     // Внешний хост (redgifs, imgur, etc.) — помечаем как video (большинство NSFW = видео)
                     results.push({url: href, type: 'video', external: true});
@@ -1080,11 +1082,24 @@ def _extract_reddit_media_sync(page) -> list[dict]:
                 results.push({url: preview, type: 'image'});
             }
         });
-        // Галерея Reddit
-        document.querySelectorAll('gallery-carousel img, [data-testid="gallery-container"] img').forEach(el => {
+        // Галерея Reddit — извлекаем ВСЕ картинки из carousel
+        document.querySelectorAll('gallery-carousel shreddit-gallery-carousel-media, gallery-carousel [data-testid="gallery-carousel-media"]').forEach(el => {
+            const img = el.querySelector('img');
+            if (img) {
+                const src = img.getAttribute('src');
+                if (src) results.push({url: src, type: 'image'});
+            }
+        });
+        // Галерея Reddit — все img внутри gallery-carousel
+        document.querySelectorAll('gallery-carousel img').forEach(el => {
             const src = el.getAttribute('src');
             if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
                 results.push({url: src, type: 'image'});
+        });
+        // data-testid="gallery-container"  
+        document.querySelectorAll('[data-testid="gallery-container"] img').forEach(el => {
+            const src = el.getAttribute('src');
+            if (src) results.push({url: src, type: 'image'});
         });
         // figure/media контейнер с оригинальным изображением
         document.querySelectorAll('figure img, [data-testid="post-container"] img').forEach(el => {
