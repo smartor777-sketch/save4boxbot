@@ -444,6 +444,7 @@ async def stats(message: types.Message):
             f"• Яндекс Видео — {c.get('yandex', 0)}\n"
             f"• Coub — {c.get('coub', 0)}\n"
             f"• Dzen — {c.get('dzen', 0)}\n"
+            f"• Reddit — {c.get('reddit', 0)}\n"
             f"Всего: {c.get('total', 0)}"
         )
 

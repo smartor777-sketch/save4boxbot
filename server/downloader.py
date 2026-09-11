@@ -1399,6 +1399,7 @@ class _RedditBrowserPool:
                                 downloaded_media.append(item)
 
                             print(f"[reddit] {url} -> {len(downloaded_media)} items")
+                            stats.record_download("reddit")
                             result_box[0] = (title, downloaded_media)
                         finally:
                             page.close()
