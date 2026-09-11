@@ -1357,10 +1357,13 @@ def _do_download_reddit(url: str, height: int | None = None,
             os.makedirs(tmp_dir, exist_ok=True)
 
             downloaded = []
+            print(f"[reddit] Processing {len(media)} media items")
             for i, item in enumerate(media):
                 media_url = item["url"]
                 ext = ".mp4" if item["type"] == "video" else ".jpg"
                 out_path = os.path.join(tmp_dir, f"reddit_{i}{ext}")
+                has_bytes = "_bytes" in item and item["_bytes"] is not None
+                print(f"[reddit] Item {i}: type={item['type']}, has_bytes={has_bytes}, url={media_url[:80]}")
 
                 try:
                     if item["type"] == "video":
@@ -1394,10 +1397,12 @@ def _do_download_reddit(url: str, height: int | None = None,
                                 print(f"[reddit] Browser download failed for {media_url}")
                                 continue
 
-                    if os.path.isfile(out_path) and os.path.getsize(out_path) > 25000:
+                    if os.path.isfile(out_path):
+                        sz = os.path.getsize(out_path)
+                        print(f"[reddit] File written: {out_path} ({sz} bytes)")
                         downloaded.append(out_path)
-                    elif os.path.isfile(out_path):
-                        os.remove(out_path)  # заглушка
+                    else:
+                        print(f"[reddit] File NOT found: {out_path}")
                 except Exception as e:
                     print(f"[reddit] Failed to download {media_url}: {e}")
 
