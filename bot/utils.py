@@ -54,7 +54,7 @@ _COUB_RE = re.compile(r"(?:www\.)?coub\.com/(?:view|embed|video)/([\w\-]+)")
 _DZEN_RE = re.compile(r"dzen\.ru/(?:video/watch|shorts)/([\w\-]+)")
 
 # Reddit
-_REDDIT_RE = re.compile(r"(?:www\.)?reddit\.com/r/\w+/comments/[\w\-]+")
+_REDDIT_RE = re.compile(r"(?:www\.)?reddit\.com/r/\w+/(?:comments|s)/[\w\-]+")
 
 
 def _video_id_from(url: str) -> str | None:

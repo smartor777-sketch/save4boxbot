@@ -382,6 +382,55 @@ def _codec_rank(vcodec: str | None) -> int:
     return 0
 
 
+def _list_formats_reddit(url: str) -> dict:
+    """Получает информацию о Reddit-посте через Playwright."""
+    url = _resolve_reddit_share(url)
+
+    browser = None
+    try:
+        browser = _get_reddit_browser()
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        _load_reddit_cookies(context)
+        page = context.new_page()
+
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(5000)
+
+        title = page.title() or "Reddit"
+
+        media = _extract_reddit_media(page)
+        context.close()
+
+        if not media:
+            return {"error": "Не удалось извлечь медиа из Reddit-поста"}
+
+        has_video = any(m["type"] == "video" for m in media)
+        has_image = any(m["type"] == "image" for m in media)
+
+        if has_video and has_image:
+            kind = "mixed"
+        elif has_video:
+            kind = "video"
+        else:
+            kind = "image"
+
+        return {
+            "ok": True,
+            "platform": "reddit",
+            "title": title,
+            "media_count": len(media),
+            "media": [{"index": i, "type": m["type"]} for i, m in enumerate(media)],
+            "kind": kind,
+        }
+
+    except Exception as e:
+        return {"error": f"Reddit: {e}"}
+    finally:
+        pass
+
+
 def list_formats(url: str) -> dict:
     import yt_dlp
 
@@ -440,6 +489,9 @@ def list_formats(url: str) -> dict:
             "formats": _group_formats(info, "tiktok"),
             "thumbnail": _save_thumbnail(info),
         }
+
+    if platform == "reddit":
+        return _list_formats_reddit(url)
 
     try:
         with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
@@ -937,6 +989,272 @@ def _safe_name(name: str) -> str:
     return keep or "coub"
 
 
+REDDIT_COOKIES_PATH = os.getenv("REDDIT_COOKIES_PATH", "/opt/yt-bot/reddit_cookies.txt")
+REDDIT_BROWSER_TTL_SEC = 300  # 5 минут — авто-закрытие
+
+_reddit_browser = None
+_reddit_browser_lock = threading.Lock()
+_reddit_browser_ts: float = 0
+
+
+def _get_reddit_browser():
+    """Запускает Playwright-браузер для Reddit (разделяемый, TTL 5 мин)."""
+    global _reddit_browser, _reddit_browser_ts
+    with _reddit_browser_lock:
+        now = time.time()
+        if _reddit_browser and now - _reddit_browser_ts < REDDIT_BROWSER_TTL_SEC:
+            return _reddit_browser
+        if _reddit_browser:
+            try:
+                _reddit_browser.close()
+            except Exception:
+                pass
+        _reddit_browser = None
+        _reddit_browser_ts = now
+
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+
+    with _reddit_browser_lock:
+        _reddit_browser = browser
+        _reddit_browser_ts = now
+    return browser
+
+
+def _kill_reddit_browser():
+    global _reddit_browser, _reddit_browser_ts
+    with _reddit_browser_lock:
+        if _reddit_browser:
+            try:
+                _reddit_browser.close()
+            except Exception:
+                pass
+            _reddit_browser = None
+            _reddit_browser_ts = 0
+
+
+def _kill_reddit_browser():
+    global _reddit_browser, _reddit_browser_ts
+    with _reddit_browser_lock:
+        if _reddit_browser:
+            try:
+                _reddit_browser.close()
+            except Exception:
+                pass
+            _reddit_browser = None
+            _reddit_browser_ts = 0
+
+
+def _load_reddit_cookies(context):
+    """Загружает cookies.txt (Netscape) в Playwright context."""
+    if not os.path.isfile(REDDIT_COOKIES_PATH):
+        return
+    cookies = []
+    with open(REDDIT_COOKIES_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            domain, _, path, secure, expires, name, value = parts[:7]
+            cookies.append({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "secure": secure.upper() == "TRUE",
+                "httpOnly": False,
+            })
+    if cookies:
+        context.add_cookies(cookies)
+
+
+def _resolve_reddit_share(url: str) -> str:
+    """Превращает /s/ share-ссылку в /comments/ формат."""
+    m = re.search(r"reddit\.com/r/(\w+)/s/(\w+)", url)
+    if not m:
+        return url
+    sub, share_id = m.group(1), m.group(2)
+    # Пробуем через Reddit JSON API (с куками)
+    api_url = f"https://www.reddit.com/r/{sub}/s/{share_id}.json"
+    try:
+        resp = httpx.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15, follow_redirects=True)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                post_data = data[0]["data"]["children"][0]["data"]
+                permalink = post_data.get("permalink", "")
+                if permalink:
+                    return f"https://www.reddit.com{permalink}"
+    except Exception:
+        pass
+    return url
+
+
+def _extract_reddit_media(page) -> list[dict]:
+    """Извлекает медиа-URL из Reddit-страницы."""
+    media = []
+
+    # Видео (reddit video / v.redd.it)
+    videos = page.evaluate("""() => {
+        const results = [];
+        // shreddit-video элементы
+        document.querySelectorAll('shreddit-video, video-player, video').forEach(el => {
+            const src = el.getAttribute('src') || el.querySelector('source')?.getAttribute('src');
+            if (src && src.includes('v.redd.it')) results.push({url: src, type: 'video'});
+        });
+        // Видео через source
+        document.querySelectorAll('video source').forEach(el => {
+            const src = el.getAttribute('src');
+            if (src && src.includes('v.redd.it')) results.push({url: src, type: 'video'});
+        });
+        // DASH видео
+        document.querySelectorAll('[data-hls-url], [data-dash-url]').forEach(el => {
+            const hls = el.getAttribute('data-hls-url');
+            const dash = el.getAttribute('data-dash-url');
+            if (hls) results.push({url: hls, type: 'video'});
+            if (dash) results.push({url: dash, type: 'video'});
+        });
+        return results;
+    }""")
+    media.extend(videos)
+
+    # Картинки (gallery / preview / i.redd.it)
+    images = page.evaluate("""() => {
+        const results = [];
+        // Галерея Reddit
+        document.querySelectorAll('gallery-carousel img, [data-testid="gallery-container"] img').forEach(el => {
+            const src = el.getAttribute('src');
+            if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
+                results.push({url: src, type: 'image'});
+        });
+        // Preview картинки
+        document.querySelectorAll('img').forEach(el => {
+            const src = el.getAttribute('src');
+            if (src && src.includes('i.redd.it'))
+                results.push({url: src, type: 'image'});
+        });
+        // Reddit preview URLs (большое разрешение)
+        document.querySelectorAll('a[href*="i.redd.it"]').forEach(el => {
+            const href = el.getAttribute('href');
+            if (href) results.push({url: href, type: 'image'});
+        });
+        return results;
+    }""")
+    media.extend(images)
+
+    # Дедупликация
+    seen = set()
+    unique = []
+    for m in media:
+        if m["url"] not in seen:
+            seen.add(m["url"])
+            unique.append(m)
+    return unique
+
+
+def _do_download_reddit(url: str, height: int | None = None,
+                        task_key: tuple[str, int | None, str | None] = None) -> dict:
+    """Скачивание Reddit-постов через Playwright (обход 403) + yt-dlp."""
+    import yt_dlp
+
+    url = _resolve_reddit_share(url)
+
+    if task_key:
+        _register_progress(task_key, status="extracting", started_at=time.time())
+
+    browser = None
+    try:
+        browser = _get_reddit_browser()
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        _load_reddit_cookies(context)
+        page = context.new_page()
+
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(5000)
+
+        title = page.title() or "Reddit"
+
+        media = _extract_reddit_media(page)
+        context.close()
+
+        if not media:
+            return {"error": "Не удалось извлечь медиа из Reddit-поста"}
+
+        if task_key:
+            _register_progress(task_key, status="downloading", started_at=time.time())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = os.path.join(tmp, "dl")
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            downloaded = []
+            for i, item in enumerate(media):
+                media_url = item["url"]
+                ext = ".mp4" if item["type"] == "video" else ".jpg"
+                out_path = os.path.join(tmp_dir, f"reddit_{i}{ext}")
+
+                try:
+                    if item["type"] == "video":
+                        opts = _base_opts(out_path)
+                        opts["format"] = "best"
+                        opts["merge_output_format"] = "mp4"
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            ydl.download([media_url])
+                        # yt-dlp might add its own extension
+                        for f in os.listdir(tmp_dir):
+                            if f.startswith(f"reddit_{i}") and f.endswith((".mp4", ".webm")):
+                                actual = os.path.join(tmp_dir, f)
+                                if actual != out_path:
+                                    os.rename(actual, out_path)
+                                    break
+                    else:
+                        resp = httpx.get(media_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+                        with open(out_path, "wb") as f:
+                            f.write(resp.content)
+
+                    if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                        downloaded.append(out_path)
+                except Exception as e:
+                    print(f"[reddit] Failed to download {media_url}: {e}")
+
+            if not downloaded:
+                return {"error": "Не удалось скачать медиа из Reddit"}
+
+            results = []
+            for path in downloaded:
+                sz = os.path.getsize(path)
+                kind = "video" if path.endswith(".mp4") else "image"
+                dst = os.path.join(DOWNLOAD_DIR, os.path.basename(path))
+                shutil.copy2(path, dst)
+                results.append({"path": dst, "size": sz, "kind": kind})
+
+            return {
+                "ok": True,
+                "title": title,
+                "files": results,
+            }
+
+    except Exception as e:
+        return {"error": f"Reddit: {e}"}
+    finally:
+        if task_key:
+            _unregister_progress(task_key)
+
+
 def _do_download(url: str, height: int | None = None, format_id: str | None = None,
                  codec: str | None = None,
                  task_key: tuple[str, int | None, str | None] | None = None,
@@ -950,6 +1268,9 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
 
     if platform == "coub":
         return _do_download_coub(url, height, task_key, loop=loop)
+
+    if platform == "reddit":
+        return _do_download_reddit(url, height, task_key)
 
     fmt_sel, suffix = _fmt_selector(platform, height, codec)
 
