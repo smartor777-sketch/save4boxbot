@@ -1114,13 +1114,24 @@ def _extract_reddit_media_sync(page) -> list[dict]:
     return unique
 
 
-def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
-    """Запускает Playwright (sync) в отдельном потоке чтобы не мешать asyncio."""
-    from playwright.sync_api import sync_playwright
+class _RedditBrowserPool:
+    """Shared Playwright browser pool for Reddit (TTL 5 min).
 
-    pw = sync_playwright().start()
-    try:
-        browser = pw.chromium.launch(
+    Browser is created once and reused across requests. After TTL of
+    inactivity, browser is closed and recreated on next request.
+    """
+
+    def __init__(self, ttl_sec: int = 300):
+        self._ttl = ttl_sec
+        self._pw = None
+        self._browser = None
+        self._last_used = 0.0
+        self._lock = threading.Lock()
+
+    def _start(self):
+        from playwright.sync_api import sync_playwright
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
@@ -1129,45 +1140,70 @@ def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
                 "--disable-blink-features=AutomationControlled",
             ],
         )
+        self._last_used = time.time()
+        print("[reddit] Browser started")
+
+    def _stop(self):
         try:
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            if _REDDIT_COOKIES:
-                context.add_cookies(_REDDIT_COOKIES)
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            if self._browser:
+                self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
+        self._browser = None
+        self._pw = None
+        self._last_used = 0.0
+        print("[reddit] Browser stopped")
 
-            # Кликаем "Yes" на age-gate если есть
-            try:
-                age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
-                if age_btn.count() > 0:
-                    age_btn.first.click()
-                    page.wait_for_timeout(2000)
-            except Exception:
-                pass
+    def get_browser(self):
+        """Return a live browser, creating one if needed."""
+        with self._lock:
+            now = time.time()
+            # Recreate if expired or dead
+            if self._browser is None or now - self._last_used > self._ttl:
+                self._stop()
+                self._start()
+            self._last_used = now
+            return self._browser
 
-            # Ждём загрузки контента
-            page.wait_for_timeout(3000)
 
-            title = page.title() or "Reddit"
+_reddit_pool = _RedditBrowserPool(ttl_sec=REDDIT_BROWSER_TTL_SEC)
 
-            # Debug: dump page HTML snippet for NSFW detection
-            html_snippet = page.evaluate("() => document.body.innerHTML.substring(0, 2000)")
-            print(f"[reddit] URL: {url}")
-            print(f"[reddit] Title: {title}")
-            print(f"[reddit] HTML snippet: {html_snippet[:500]}")
 
-            media = _extract_reddit_media_sync(page)
-            print(f"[reddit] Extracted media: {media}")
+def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
+    """Extract media from Reddit using shared browser pool."""
+    browser = _reddit_pool.get_browser()
 
-            context.close()
-            return title, media
-        finally:
-            browser.close()
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    )
+    if _REDDIT_COOKIES:
+        context.add_cookies(_REDDIT_COOKIES)
+    page = context.new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+
+        # Кликаем "Yes" на age-gate если есть
+        try:
+            age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
+            if age_btn.count() > 0:
+                age_btn.first.click()
+                page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(3000)
+        title = page.title() or "Reddit"
+        media = _extract_reddit_media_sync(page)
+        print(f"[reddit] {url} -> {len(media)} items: {[m['type'] for m in media]}")
+        return title, media
     finally:
-        pw.stop()
+        context.close()
 
 
 def _do_download_reddit(url: str, height: int | None = None,
