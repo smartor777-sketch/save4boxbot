@@ -1,4 +1,5 @@
 # Netscape HTTP Cookie File
+.reddit.com	TRUE	/	TRUE	0	over18	1
 .reddit.com	TRUE	/	TRUE	0	csrf_token	48256b5b728544ce0e474fbe484d605d
 .reddit.com	TRUE	/	TRUE	1823678125	csv	2
 .reddit.com	TRUE	/	TRUE	1823678114	edgebucket	RyBTivBGPKGyXoGKPB

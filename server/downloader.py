@@ -1060,19 +1060,42 @@ def _extract_reddit_media_sync(page) -> list[dict]:
 
     images = page.evaluate("""() => {
         const results = [];
+        // shreddit-post: content-href может быть ссылкой на внешний хост (redgifs, imgur, etc.)
+        document.querySelectorAll('shreddit-post').forEach(el => {
+            const href = el.getAttribute('content-href');
+            if (href) {
+                if (href.includes('i.redd.it')) {
+                    results.push({url: href, type: 'image'});
+                } else if (href.includes('v.redd.it') || href.includes('.mp4')) {
+                    results.push({url: href, type: 'video'});
+                } else {
+                    // Внешний хост (redgifs, imgur, etc.) — помечаем как video (большинство NSFW = видео)
+                    results.push({url: href, type: 'video', external: true});
+                }
+            }
+            // Также проверяем preview-href
+            const preview = el.getAttribute('preview-href');
+            if (preview && preview.includes('i.redd.it')) {
+                results.push({url: preview, type: 'image'});
+            }
+        });
+        // Галерея Reddit
         document.querySelectorAll('gallery-carousel img, [data-testid="gallery-container"] img').forEach(el => {
             const src = el.getAttribute('src');
             if (src && (src.includes('i.redd.it') || src.includes('preview.redd.it')))
                 results.push({url: src, type: 'image'});
         });
-        document.querySelectorAll('img').forEach(el => {
+        // figure/media контейнер с оригинальным изображением
+        document.querySelectorAll('figure img, [data-testid="post-container"] img').forEach(el => {
             const src = el.getAttribute('src');
-            if (src && src.includes('i.redd.it'))
+            if (src && src.includes('i.redd.it') && !src.includes('preview'))
                 results.push({url: src, type: 'image'});
         });
-        document.querySelectorAll('a[href*="i.redd.it"]').forEach(el => {
-            const href = el.getAttribute('href');
-            if (href) results.push({url: href, type: 'image'});
+        // Все i.redd.it картинки (исключая preview и thumb)
+        document.querySelectorAll('img').forEach(el => {
+            const src = el.getAttribute('src');
+            if (src && src.includes('i.redd.it') && !src.includes('preview') && !src.includes('thumb'))
+                results.push({url: src, type: 'image'});
         });
         return results;
     }""")
@@ -1084,6 +1107,10 @@ def _extract_reddit_media_sync(page) -> list[dict]:
         if m["url"] not in seen:
             seen.add(m["url"])
             unique.append(m)
+    # Если есть внешний контент (redgifs, imgur) — убираем reddit preview
+    has_external = any(m.get("external") for m in unique)
+    if has_external:
+        unique = [m for m in unique if m.get("external") or "i.redd.it" not in m["url"]]
     return unique
 
 
@@ -1110,9 +1137,31 @@ def _run_reddit_playwright(url: str) -> tuple[str, list[dict]]:
                 context.add_cookies(_REDDIT_COOKIES)
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(3000)
+
+            # Кликаем "Yes" на age-gate если есть
+            try:
+                age_btn = page.locator('button:has-text("Yes"), button:has-text("yes"), [data-testid="nsfw-overlay"] button')
+                if age_btn.count() > 0:
+                    age_btn.first.click()
+                    page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+            # Ждём загрузки контента
+            page.wait_for_timeout(3000)
+
             title = page.title() or "Reddit"
+
+            # Debug: dump page HTML snippet for NSFW detection
+            html_snippet = page.evaluate("() => document.body.innerHTML.substring(0, 2000)")
+            print(f"[reddit] URL: {url}")
+            print(f"[reddit] Title: {title}")
+            print(f"[reddit] HTML snippet: {html_snippet[:500]}")
+
             media = _extract_reddit_media_sync(page)
+            print(f"[reddit] Extracted media: {media}")
+
             context.close()
             return title, media
         finally:
