@@ -18,6 +18,7 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 MAX_FILESIZE_BYTES = int(os.getenv("MAX_FILESIZE_MB", "50")) * 1024 * 1024
 
 COOKIE_FILE = os.getenv("COOKIE_FILE", "")
+VK_COOKIE_FILE = os.getenv("VK_COOKIE_FILE", "")
 
 CLEANUP_INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_MIN", "15")) * 60
 FILE_MAX_AGE_SEC = int(os.getenv("FILE_MAX_AGE_MIN", "15")) * 60
@@ -229,7 +230,7 @@ JS_RUNTIMES = [r.strip() for r in os.getenv(
 ).split(",") if r.strip()]
 
 
-def _base_opts(output_template: str, http_chunk_size: int | None = None) -> dict:
+def _base_opts(output_template: str, http_chunk_size: int | None = None, platform: str | None = None) -> dict:
     opts = {
         "outtmpl": output_template,
         "noplaylist": True,
@@ -256,6 +257,8 @@ def _base_opts(output_template: str, http_chunk_size: int | None = None) -> dict
         opts["impersonate"] = ImpersonateTarget.from_str(impersonate)
     if COOKIE_FILE and os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
+    if platform == "vk" and VK_COOKIE_FILE and os.path.exists(VK_COOKIE_FILE):
+        opts["cookiefile"] = VK_COOKIE_FILE
     return opts
 
 
@@ -482,7 +485,7 @@ def list_formats(url: str) -> dict:
         return _list_formats_reddit(url)
 
     try:
-        with yt_dlp.YoutubeDL(_base_opts("")) as ydl:
+        with yt_dlp.YoutubeDL(_base_opts("", platform=platform)) as ydl:
             info = _extract_info_with_retry(ydl, url, download=False)
     except Exception as e:
         return {"error": f"Не удалось получить информацию: {e}"}
@@ -1563,6 +1566,7 @@ def _do_download(url: str, height: int | None = None, format_id: str | None = No
         opts = opts_fn(
             os.path.join(tmp_dir, f"%(title).100B [%(id)s]{suffix}.%(ext)s"),
             http_chunk_size=HTTP_CHUNK_SIZE if platform == "youtube" else None,
+            platform=platform,
         )
         opts["format"] = fmt_sel
         opts["merge_output_format"] = "mp4"
