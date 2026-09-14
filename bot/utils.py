@@ -151,7 +151,14 @@ def extract_vk_url(text: str) -> tuple[str, str] | None:
         return None
 
     video_id = m.group(1)
-    return f"https://vkvideo.ru/video{video_id}", video_id
+    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+    parsed = urlparse(raw)
+    qs = parse_qs(parsed.query)
+    new_url = f"https://vkvideo.ru/video{video_id}"
+    if qs:
+        flat = {k: v[0] if len(v) == 1 else v for k, v in qs.items()}
+        new_url += "?" + urlencode(flat)
+    return new_url, video_id
 
 
 def extract_yandex_url(text: str) -> tuple[str, str] | None:
