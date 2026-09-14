@@ -151,7 +151,7 @@ def extract_vk_url(text: str) -> tuple[str, str] | None:
         return None
 
     video_id = m.group(1)
-    return f"https://vk.com/video{video_id}", video_id
+    return f"https://vkvideo.ru/video{video_id}", video_id
 
 
 def extract_yandex_url(text: str) -> tuple[str, str] | None:
