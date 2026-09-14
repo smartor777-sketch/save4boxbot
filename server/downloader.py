@@ -562,7 +562,7 @@ def _group_formats(info: dict, platform: str) -> list[dict]:
         vcodec = f.get("vcodec")
         acodec = f.get("acodec")
 
-        if height and vcodec != "none":
+        if height and vcodec and vcodec != "none":
             ck = _codec_key(vcodec)
             size = f.get("filesize") or f.get("filesize_approx")
             tbr = f.get("tbr") or 0
